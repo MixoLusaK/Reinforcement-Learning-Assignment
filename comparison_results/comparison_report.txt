@@ -2,56 +2,57 @@
 DQN MODEL COMPARISON REPORT
 ================================================================================
 
-Generated: 2025-10-20 07:11:18
+Generated: 2025-10-20 18:38:15
 
 MODELS COMPARED:
   Baseline: dqn_baseline_results.json
   Improved: dqn_improved_results.json
-  Episodes: 200
+  Episodes: 500
 
 ================================================================================
 PERFORMANCE SUMMARY
 ================================================================================
 
 CUMULATIVE REWARD:
-  Baseline: 4.99 ± 1.34
-  Improved: 6.19 ± 2.18
-  Change:   +1.20 (+24.05%)
+  Baseline: 4.76 ± 1.34
+  Improved: 5.94 ± 2.06
+  Change:   +1.17 (+24.64%)
 
 ACHIEVEMENTS PER EPISODE:
-  Baseline: 5.89
-  Improved: 7.09
-  Change:   +1.20 (+20.27%)
+  Baseline: 5.66
+  Improved: 6.84
+  Change:   +1.17 (+20.73%)
 
 SURVIVAL TIME (steps):
-  Baseline: 190.05 ± 41.49
-  Improved: 213.69 ± 59.11
-  Change:   +23.64 (+12.44%)
+  Baseline: 195.83 ± 49.94
+  Improved: 207.00 ± 51.71
+  Change:   +11.16 (+5.70%)
 
 GEOMETRIC MEAN OF ACHIEVEMENTS:
-  Baseline: 0.439141
-  Improved: 0.312146
-  Change:   -0.126995
+  Baseline: 0.210895
+  Improved: 0.329185
+  Change:   +0.118290
 
 ================================================================================
 ACHIEVEMENT IMPROVEMENTS
 ================================================================================
 
 Top 10 Most Improved Achievements:
- 1. make_wood_pickaxe        :  10.0% →  67.0% (+57.0 pp)
- 2. defeat_zombie            :  10.5% →  46.0% (+35.5 pp)
- 3. make_wood_sword          :  18.5% →  50.5% (+32.0 pp)
- 4. collect_stone            :   0.0% →  26.0% (+26.0 pp)
- 5. place_stone              :   0.0% →  23.0% (+23.0 pp)
- 6. eat_cow                  :  37.0% →  42.5% (+5.5 pp)
- 7. place_table              :  82.0% →  85.5% (+3.5 pp)
- 8. collect_coal             :   0.0% →   2.5% (+2.5 pp)
- 9. collect_wood             :  94.0% →  95.0% (+1.0 pp)
-10. wake_up                  :  72.5% →  73.0% (+0.5 pp)
+ 1. make_wood_pickaxe        :   9.0% →  64.2% (+55.2 pp)
+ 2. defeat_zombie            :  11.6% →  44.2% (+32.6 pp)
+ 3. make_wood_sword          :  16.6% →  49.2% (+32.6 pp)
+ 4. collect_stone            :   0.6% →  25.0% (+24.4 pp)
+ 5. place_stone              :   0.0% →  21.2% (+21.2 pp)
+ 6. place_table              :  76.0% →  87.4% (+11.4 pp)
+ 7. eat_cow                  :  30.6% →  37.4% (+6.8 pp)
+ 8. wake_up                  :  64.0% →  70.0% (+6.0 pp)
+ 9. collect_wood             :  91.4% →  96.0% (+4.6 pp)
+10. collect_coal             :   0.0% →   2.6% (+2.6 pp)
 
-Achievements with Decreased Rates (> 1 pp): 2
-  - place_plant              :  97.0% →  61.5% (-35.5 pp)
-  - collect_sapling          :  98.5% →  67.5% (-31.0 pp)
+Achievements with Decreased Rates (> 1 pp): 3
+  - place_plant              :  94.2% →  53.6% (-40.6 pp)
+  - collect_sapling          :  95.8% →  65.8% (-30.0 pp)
+  - collect_drink            :  75.8% →  65.4% (-10.4 pp)
 
 ================================================================================
 END OF REPORT

@@ -3,7 +3,8 @@ import gym
 import crafter
 from gym.envs.registration import register
 from shimmy import GymV21CompatibilityV0
-
+from gym.wrappers import FrameStack
+from .frame_wrapper import FrameStackWrapper
 # Optional reward shaping wrapper
 try:
     from .belief_reward_shaping import BeliefRewardWrapper
@@ -101,5 +102,50 @@ def make_shaped_env(log_dir='./Training/Logs/jsons_shaped/',
         )
     else:
         print("WARNING: BeliefRewardWrapper not available, using standard environment")
+
+    return env
+
+def framed_make_env(log_dir='./Training/Logs/jsons_framed/',
+                    lambda_param=1000,
+                    health_weight=0.1,
+                    clip_belief_reward=True,
+                    use_clusters=True,
+                    save_video=False,
+                    save_episode=False):
+    """
+    Create Crafter environment WITH BOTH reward shaping AND frame stacking.
+    Uses a different approach to avoid compatibility issues.
+    """
+    os.makedirs(log_dir, exist_ok=True)
+
+    # Create base environment
+    env = gym.make("CrafterPartial-v1")
+
+    # Apply Recorder wrapper
+    env = crafter.Recorder(
+        env,
+        log_dir,
+        save_stats=True,
+        save_video=save_video,
+        save_episode=save_episode
+    )
+
+    # Apply compatibility wrapper FIRST
+    env = GymV21CompatibilityV0(env=env)
+
+    # Apply reward shaping wrapper (if available)
+    if BeliefRewardWrapper is not None:
+        env = BeliefRewardWrapper(
+            env,
+            lambda_param=lambda_param,
+            health_weight=health_weight,
+            clip_belief_reward=clip_belief_reward,
+            use_clusters=use_clusters
+        )
+    else:
+        print("WARNING: BeliefRewardWrapper not available, using standard environment")
+
+    # Apply frame stacking LAST (after compatibility wrapper)
+    env = FrameStackWrapper(env, k=4)
 
     return env
