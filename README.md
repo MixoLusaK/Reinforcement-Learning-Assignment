@@ -36,23 +36,23 @@ conda activate crafter_env
 ### 3.Project Folder Structure
 ```graphql
 Crafter_Project/
-│
+
 ├── Model_Building/  
-    |──__init__.py               # Training scripts
+|   |──__init__.py               # Training scripts
 │   ├── dqn_models.py
 │   ├── sac_models.py
 │
 ├── Model_Testing/  
-    ├──__init__.py           # Evaluation and testing scripts
+│   ├──__init__.py              # Evaluation and testing scripts
 │   ├── dqn_testing.py
 │   └── sac_testing.py
 │
 ├── Model_Helpers/              # Environment wrappers for Crafter
 │   ├── __init__.py
-│   ├── environment.py         # Base + reward-shaped environments
+│   ├── environment.py
+│   ├── frame_wrapper.py                
 │   └── belief_reward_shaping.py 
 │     
-
 ├── environment.yml          # Project dependencies
 └── README.md     
 ```
