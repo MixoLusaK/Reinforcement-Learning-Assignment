@@ -1,6 +1,7 @@
 # Dependencies
 import argparse
 from stable_baselines3 import DQN
+from stable_baselines3.common.vec_env import DummyVecEnv, VecFrameStack
 import os
 import sys
 import numpy as np
@@ -93,6 +94,55 @@ class CrafterGymnasiumWrapper(gym.Env):
             self._env.close()
 
 
+class VecFrameCaptureWrapper:
+    """
+    Wrapper to capture frames from VecFrameStack environment for video recording.
+    Extracts only the most recent frame from stacked observations.
+    """
+
+    def __init__(self, vec_env):
+        self.vec_env = vec_env
+        self._last_frame = None
+
+    def __getattr__(self, name):
+        """Delegate attribute access to wrapped environment"""
+        return getattr(self.vec_env, name)
+
+    def reset(self):
+        """Reset and capture initial frame"""
+        obs = self.vec_env.reset()
+        self._capture_current_frame(obs)
+        return obs
+
+    def step(self, actions):
+        """Step and capture frame"""
+        obs, rewards, dones, infos = self.vec_env.step(actions)
+        self._capture_current_frame(obs)
+        return obs, rewards, dones, infos
+
+    def _capture_current_frame(self, stacked_obs):
+        """Extract the most recent frame from stacked observation"""
+        # stacked_obs shape: (1, 12, 64, 64) for batch
+        # We want the last 3 channels (most recent frame)
+        try:
+            obs = stacked_obs[0]  # Remove batch dimension: (12, 64, 64)
+
+            # Last 3 channels are the most recent frame
+            recent_frame = obs[-3:, :, :]  # Shape: (3, 64, 64)
+
+            # Convert from (C, H, W) to (H, W, C) for video
+            frame = np.transpose(recent_frame, (1, 2, 0))  # Shape: (64, 64, 3)
+
+            self._last_frame = frame.astype(np.uint8)
+        except Exception as e:
+            print(f"Frame capture error: {e}")
+            self._last_frame = None
+
+    def get_current_frame(self):
+        """Get the most recently captured frame"""
+        return self._last_frame
+
+
 class DQN_Testing:
     """
     Class to test DQN models on Crafter environment.
@@ -103,12 +153,15 @@ class DQN_Testing:
     """
 
     def __init__(self, model_path, num_episodes=100, video_dir="./crafter_videos/",
-                 results_dir="./results/", plots_dir="./plots/"):
+                 results_dir="./results/", plots_dir="./plots/", use_frame_stacking=False,
+                 n_stack=4):
         self.model_path = model_path
         self.num_episodes = num_episodes
         self.video_dir = video_dir
         self.results_dir = results_dir
         self.plots_dir = plots_dir
+        self.use_frame_stacking = use_frame_stacking
+        self.n_stack = n_stack
 
         # Create directories
         os.makedirs(self.video_dir, exist_ok=True)
@@ -126,9 +179,28 @@ class DQN_Testing:
         ]
 
     def _make_test_env(self):
-        """Create a testing environment using pure Gymnasium API"""
-        env = CrafterGymnasiumWrapper()
-        return env
+        """
+        Create a testing environment.
+
+        If use_frame_stacking=True, wraps the environment with frame stacking
+        to match the training configuration.
+        """
+        # Create base environment
+        base_env = CrafterGymnasiumWrapper()
+
+        if self.use_frame_stacking:
+            # Wrap in DummyVecEnv (required for VecFrameStack)
+            vec_env = DummyVecEnv([lambda: base_env])
+
+            # Apply frame stacking
+            stacked_env = VecFrameStack(vec_env, n_stack=self.n_stack)
+
+            # Wrap with frame capture wrapper for video recording
+            env = VecFrameCaptureWrapper(stacked_env)
+
+            return env
+        else:
+            return base_env
 
     def _save_video(self, frames, episode_num, model_name):
         """Save video with fallback options"""
@@ -202,7 +274,7 @@ class DQN_Testing:
         Comprehensive evaluation of DQN model.
 
         Args:
-            model_type: 'baseline' or 'improved'
+            model_type: 'baseline', 'framed', or 'improved'
         """
         print(f"Loading model from: {self.model_path}")
         model = DQN.load(self.model_path)
@@ -214,13 +286,19 @@ class DQN_Testing:
         achievement_per_episode = []
         action_counts = defaultdict(int)
 
-        model_name_display = "DQN Baseline" if model_type == 'baseline' else "DQN Improved"
+        model_name_display = {
+            'baseline': 'DQN Baseline',
+            'framed': 'DQN Frame Stacking',
+            'improved': 'DQN Fully Improved'
+        }.get(model_type, f'DQN {model_type.title()}')
 
         print(f"\nTesting {model_name_display} Model over {self.num_episodes} episodes...")
         print("=" * 70)
-        print("EVALUATION ON STANDARD REWARDS (No Reward Shaping)")
-        if model_type == 'improved':
-            print("Model was trained WITH belief reward shaping, but evaluated WITHOUT it.")
+        print("EVALUATION ON STANDARD REWARDS")
+        if self.use_frame_stacking:
+            print(f"Using frame stacking: {self.n_stack} frames")
+        if model_type in ['improved', 'framed']:
+            print("Model was trained WITH improvements, but evaluated WITHOUT reward shaping.")
         print("=" * 70)
 
         first_high_achievement_recorded = False
@@ -228,33 +306,61 @@ class DQN_Testing:
         for episode in range(self.num_episodes):
             env = self._make_test_env()
 
-            obs, info = env.reset()
-            terminated = False
-            truncated = False
+            # Handle both regular and vectorized environments
+            if self.use_frame_stacking:
+                obs = env.reset()
+                terminated = np.array([False])
+                truncated = np.array([False])
+            else:
+                obs, info = env.reset()
+                terminated = False
+                truncated = False
+
             episode_reward = 0
             step = 0
             episode_achievements = set()
 
-            # Always collect frames (we'll decide later whether to save)
+            # Always collect frames
             episode_frames = []
 
             # Capture initial frame
-            frame = env.get_frame()
+            if self.use_frame_stacking:
+                frame = env.get_current_frame()
+            else:
+                frame = env.get_frame()
+
             if frame is not None:
                 episode_frames.append(frame)
 
-            while not (terminated or truncated):
+            while not (terminated.any() if isinstance(terminated, np.ndarray) else terminated):
                 # Predict action
                 action, _ = model.predict(obs, deterministic=True)
-                action_counts[int(action)] += 1
+
+                if self.use_frame_stacking:
+                    # For vectorized env, action is already an array
+                    action_counts[int(action[0])] += 1
+                else:
+                    action_counts[int(action)] += 1
 
                 # Step environment
-                obs, reward, terminated, truncated, info = env.step(action)
+                if self.use_frame_stacking:
+                    obs, reward, done, infos = env.step(action)
+                    reward = reward[0]
+                    terminated = done
+                    truncated = np.array([False])
+                    info = infos[0]
+                else:
+                    obs, reward, terminated, truncated, info = env.step(action)
+
                 episode_reward += reward
                 step += 1
 
                 # Capture frame
-                frame = env.get_frame()
+                if self.use_frame_stacking:
+                    frame = env.get_current_frame()
+                else:
+                    frame = env.get_frame()
+
                 if frame is not None:
                     episode_frames.append(frame)
 
@@ -284,9 +390,13 @@ class DQN_Testing:
                   f"Reward={episode_reward:6.2f}, "
                   f"Steps={step:4d}, "
                   f"Achievements={len(episode_achievements):2d}"
-                  f"{' ⭐ RECORDED!' if (not first_high_achievement_recorded and num_achievements >= 11) or (first_high_achievement_recorded and episode == 0) else ''}")
+                  f"{' ⭐ RECORDED!' if (not first_high_achievement_recorded and num_achievements >= 11) else ''}")
 
-            env.close()
+            # Close environment
+            if self.use_frame_stacking:
+                env.close()
+            else:
+                env.close()
 
         # Calculate metrics
         avg_reward = np.mean(episode_rewards)
@@ -337,6 +447,8 @@ class DQN_Testing:
             "num_episodes": self.num_episodes,
             "timestamp": datetime.now().isoformat(),
             "evaluation_type": "STANDARD_REWARDS",
+            "frame_stacking": self.use_frame_stacking,
+            "n_stack": self.n_stack if self.use_frame_stacking else None,
             "metrics": {
                 "average_reward": float(avg_reward),
                 "std_reward": float(std_reward),
@@ -442,10 +554,14 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Test DQN models on Crafter')
     parser.add_argument('--model_path', type=str, required=True,
                         help='Path to the trained model')
-    parser.add_argument('--model_type', type=str, choices=['baseline', 'improved'],
+    parser.add_argument('--model_type', type=str, choices=['baseline', 'improved', 'framed'],
                         default='baseline', help='Type of model to test')
     parser.add_argument('--num_episodes', type=int, default=100,
                         help='Number of episodes to test')
+    parser.add_argument('--use_frame_stacking', action='store_true',
+                        help='Use frame stacking (required for models trained with frame stacking)')
+    parser.add_argument('--n_stack', type=int, default=4,
+                        help='Number of frames to stack (if using frame stacking)')
     parser.add_argument('--video_dir', type=str, default='./crafter_videos/',
                         help='Directory to save videos')
     parser.add_argument('--results_dir', type=str, default='./results/',
@@ -455,12 +571,19 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
 
+    # Auto-detect frame stacking for 'framed' and 'improved' models
+    if args.model_type in ['framed', 'improved']:
+        args.use_frame_stacking = True
+        print(f"Note: Automatically enabled frame stacking for '{args.model_type}' model")
+
     tester = DQN_Testing(
         model_path=args.model_path,
         num_episodes=args.num_episodes,
         video_dir=args.video_dir,
         results_dir=args.results_dir,
-        plots_dir=args.plots_dir
+        plots_dir=args.plots_dir,
+        use_frame_stacking=args.use_frame_stacking,
+        n_stack=args.n_stack
     )
 
     # Run test

@@ -1,58 +1,105 @@
 ================================================================================
-DQN MODEL COMPARISON REPORT
+MULTI-MODEL COMPARISON REPORT
 ================================================================================
 
-Generated: 2025-10-20 18:38:15
+Generated: 2025-10-22 18:57:47
 
 MODELS COMPARED:
-  Baseline: dqn_baseline_results.json
-  Improved: dqn_improved_results.json
-  Episodes: 500
+  1. Baseline:
+     File: dqn_baseline_results.json
+     Episodes: 200
+  2. Frame Stacking:
+     File: dqn_framed_results.json
+     Episodes: 200
+  3. Improved:
+     File: dqn_improved_results.json
+     Episodes: 200
 
 ================================================================================
 PERFORMANCE SUMMARY
 ================================================================================
 
 CUMULATIVE REWARD:
-  Baseline: 4.76 ± 1.34
-  Improved: 5.94 ± 2.06
-  Change:   +1.17 (+24.64%)
+  Model                        Mean          Std     vs Baseline
+  --------------------------------------------------------------
+  Baseline                     4.70         1.31               -
+  Frame Stacking               4.12         1.43         -12.23%
+  Improved                     5.62         1.59         +19.57%
 
 ACHIEVEMENTS PER EPISODE:
-  Baseline: 5.66
-  Improved: 6.84
-  Change:   +1.17 (+20.73%)
+  Model                        Mean     vs Baseline
+  --------------------------------------------------
+  Baseline                     5.61               -
+  Frame Stacking               5.03         -10.35%
+  Improved                     6.52         +16.32%
 
 SURVIVAL TIME (steps):
-  Baseline: 195.83 ± 49.94
-  Improved: 207.00 ± 51.71
-  Change:   +11.16 (+5.70%)
+  Model                        Mean          Std     vs Baseline
+  --------------------------------------------------------------
+  Baseline                   190.75        48.53               -
+  Frame Stacking             188.26        52.93          -1.30%
+  Improved                   205.43        53.54          +7.70%
 
 GEOMETRIC MEAN OF ACHIEVEMENTS:
-  Baseline: 0.210895
-  Improved: 0.329185
-  Change:   +0.118290
+  Model                       Score     vs Baseline
+  --------------------------------------------------
+  Baseline                 0.279431               -
+  Frame Stacking           0.352599         +26.18%
+  Improved                 0.137532         -50.78%
 
 ================================================================================
-ACHIEVEMENT IMPROVEMENTS
+ACHIEVEMENT ANALYSIS
 ================================================================================
 
-Top 10 Most Improved Achievements:
- 1. make_wood_pickaxe        :   9.0% →  64.2% (+55.2 pp)
- 2. defeat_zombie            :  11.6% →  44.2% (+32.6 pp)
- 3. make_wood_sword          :  16.6% →  49.2% (+32.6 pp)
- 4. collect_stone            :   0.6% →  25.0% (+24.4 pp)
- 5. place_stone              :   0.0% →  21.2% (+21.2 pp)
- 6. place_table              :  76.0% →  87.4% (+11.4 pp)
- 7. eat_cow                  :  30.6% →  37.4% (+6.8 pp)
- 8. wake_up                  :  64.0% →  70.0% (+6.0 pp)
- 9. collect_wood             :  91.4% →  96.0% (+4.6 pp)
-10. collect_coal             :   0.0% →   2.6% (+2.6 pp)
+Top 10 Most Improved Achievements (Improved vs Baseline):
+  #    Achievement                    Baseline      Final     Change
+  --------------------------------------------------------------------
+  1    make_wood_pickaxe                  5.5%      39.5%      34.0pp
+  2    make_wood_sword                   16.5%      39.0%      22.5pp
+  3    place_table                       73.5%      87.0%      13.5pp
+  4    eat_cow                           30.0%      41.0%      11.0pp
+  5    collect_stone                      1.0%       8.5%       7.5pp
+  6    collect_wood                      91.0%      95.0%       4.0pp
+  7    collect_coal                       0.0%       3.5%       3.5pp
+  8    collect_drink                     72.5%      74.5%       2.0pp
+  9    defeat_skeleton                    0.0%       2.0%       2.0pp
+  10   place_stone                        0.0%       1.0%       1.0pp
 
 Achievements with Decreased Rates (> 1 pp): 3
-  - place_plant              :  94.2% →  53.6% (-40.6 pp)
-  - collect_sapling          :  95.8% →  65.8% (-30.0 pp)
-  - collect_drink            :  75.8% →  65.4% (-10.4 pp)
+  - defeat_zombie                     10.0% →       5.0% (     -5.0pp)
+  - wake_up                           63.0% →      59.0% (     -4.0pp)
+  - place_plant                       98.0% →      96.5% (     -1.5pp)
+
+================================================================================
+PROGRESSIVE IMPROVEMENT TABLE
+================================================================================
+
+Achievement unlock rates across all models:
+
+  Achievement                    Baseline Frame Stac   Improved
+  -------------------------------------------------------------
+  collect_coal                       0.0%       0.0%       3.5%
+  collect_diamond                    0.0%       0.0%       0.0%
+  collect_drink                     72.5%      74.0%      74.5%
+  collect_iron                       0.0%       0.0%       0.0%
+  collect_sapling                   99.5%      83.0%      99.5%
+  collect_stone                      1.0%       0.0%       8.5%
+  collect_wood                      91.0%      77.5%      95.0%
+  defeat_skeleton                    0.0%       0.0%       2.0%
+  defeat_zombie                     10.0%      10.0%       5.0%
+  eat_cow                           30.0%      34.0%      41.0%
+  eat_plant                          0.0%       0.0%       0.5%
+  make_iron_pickaxe                  0.0%       0.0%       0.0%
+  make_iron_sword                    0.0%       0.0%       0.0%
+  make_stone_pickaxe                 0.0%       0.0%       0.0%
+  make_stone_sword                   0.0%       0.0%       0.5%
+  make_wood_pickaxe                  5.5%       7.5%      39.5%
+  make_wood_sword                   16.5%       7.5%      39.0%
+  place_furnace                      0.0%       0.0%       0.0%
+  place_plant                       98.0%      70.0%      96.5%
+  place_stone                        0.0%       0.0%       1.0%
+  place_table                       73.5%      56.5%      87.0%
+  wake_up                           63.0%      82.5%      59.0%
 
 ================================================================================
 END OF REPORT
