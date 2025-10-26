@@ -1,7 +1,7 @@
 import os
-import gym
+import gymnasium as gym
 import crafter
-from gym.envs.registration import register
+from gymnasium.envs.registration import register
 from shimmy import GymV21CompatibilityV0
 
 # Optional reward shaping wrapper
@@ -33,8 +33,10 @@ def make_env(log_dir='./Training/Logs/jsons/',
     """
     os.makedirs(log_dir, exist_ok=True)
 
-    # Create base environment
-    env = gym.make("CrafterPartial-v1")
+    # Create base environment directly from the local crafter package
+    # Avoid using `gym.make` (gymnasium) because the local `crafter.Env`
+    # may not subclass `gymnasium.Env` and would trigger a type check error.
+    env = crafter.Env()
 
     # Apply Recorder wrapper
     env = crafter.Recorder(
@@ -75,8 +77,8 @@ def make_shaped_env(log_dir='./Training/Logs/jsons_shaped/',
     """
     os.makedirs(log_dir, exist_ok=True)
 
-    # Create base environment
-    env = gym.make("CrafterPartial-v1")
+    # Create base environment directly from the local crafter package
+    env = crafter.Env()
 
     # Apply Recorder wrapper
     env = crafter.Recorder(
