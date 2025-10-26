@@ -5,13 +5,71 @@ from datetime import datetime
 from typing import Dict, Any, Optional
 import numpy as np
 import torch
+import torch.nn as nn
 from stable_baselines3 import DQN
 from stable_baselines3.common.callbacks import BaseCallback
+from stable_baselines3.common.torch_layers import BaseFeaturesExtractor
 import psutil
-import gc
 from Model_Helpers.environments import make_env as make_crafter_env
 from Model_Helpers.environments import make_shaped_env as make_shaped_crafter_env
-from Model_Helpers.environments import framed_make_env as framed_make_crafter_env
+from Model_Helpers.environments import make_preprocessed_shaped_env as make_preprocessed_shaped_crafter_env
+
+
+# -------------------------------
+# Custom CNN for Single-Channel Images
+# -------------------------------
+class SingleChannelCNN(BaseFeaturesExtractor):
+    """
+    Custom CNN architecture for single-channel (grayscale) images.
+
+    This is similar to NatureCNN but adapted for single-channel inputs.
+    Architecture:
+    - Conv2d(1, 32, kernel_size=8, stride=4)
+    - Conv2d(32, 64, kernel_size=4, stride=2)
+    - Conv2d(64, 64, kernel_size=3, stride=1)
+    - Flatten -> Linear(features_dim)
+    """
+
+    def __init__(self, observation_space, features_dim: int = 512):
+        super().__init__(observation_space, features_dim)
+
+        # Extract input dimensions
+        n_input_channels = observation_space.shape[2]  # Should be 1 for grayscale
+
+        print(f"[CNN] Building custom CNN for single-channel images")
+        print(f"[CNN] Input channels: {n_input_channels}")
+        print(f"[CNN] Input shape: {observation_space.shape}")
+
+        self.cnn = nn.Sequential(
+            nn.Conv2d(n_input_channels, 32, kernel_size=8, stride=4, padding=0),
+            nn.ReLU(),
+            nn.Conv2d(32, 64, kernel_size=4, stride=2, padding=0),
+            nn.ReLU(),
+            nn.Conv2d(64, 64, kernel_size=3, stride=1, padding=0),
+            nn.ReLU(),
+            nn.Flatten(),
+        )
+
+        # Compute shape by doing one forward pass
+        with torch.no_grad():
+            # Transpose to (batch, channels, height, width) format
+            sample = torch.as_tensor(observation_space.sample()[None]).float()
+            # Reshape from (1, H, W, C) to (1, C, H, W)
+            sample = sample.permute(0, 3, 1, 2)
+            n_flatten = self.cnn(sample).shape[1]
+
+        print(f"[CNN] Flattened features: {n_flatten}")
+
+        self.linear = nn.Sequential(
+            nn.Linear(n_flatten, features_dim),
+            nn.ReLU()
+        )
+
+    def forward(self, observations: torch.Tensor) -> torch.Tensor:
+        # Input shape: (batch, height, width, channels)
+        # Need: (batch, channels, height, width)
+        observations = observations.permute(0, 3, 1, 2)
+        return self.linear(self.cnn(observations))
 
 
 # -------------------------------
@@ -57,40 +115,6 @@ class TensorBoardPrintCallback(BaseCallback):
         return True
 
 
-class MemoryMonitorCallback(BaseCallback):
-    """Monitor memory usage during training to detect leaks"""
-
-    def __init__(self, check_freq: int = 1000, verbose=0):
-        super().__init__(verbose)
-        self.check_freq = check_freq
-        self.process = psutil.Process()
-        self.memory_history = []
-
-    def _on_step(self) -> bool:
-        if self.n_calls % self.check_freq == 0:
-            # Get memory info
-            mem_info = self.process.memory_info()
-            mem_mb = mem_info.rss / 1024 / 1024
-
-            self.memory_history.append(mem_mb)
-
-            # Log to tensorboard
-            self.logger.record('system/memory_mb', mem_mb)
-
-            # Print warning if memory is growing rapidly
-            if len(self.memory_history) > 10:
-                recent_growth = self.memory_history[-1] - self.memory_history[-10]
-                if recent_growth > 500:  # 500 MB growth in 10 checks
-                    print(f"\n⚠️  WARNING: Rapid memory growth detected!")
-                    print(f"   Memory: {mem_mb:.1f} MB (grew {recent_growth:.1f} MB recently)")
-
-                    # Force garbage collection
-                    gc.collect()
-
-            if self.verbose > 0:
-                print(f"Step {self.num_timesteps}: Memory usage: {mem_mb:.1f} MB")
-
-        return True
 
 
 # -------------------------------
@@ -108,13 +132,9 @@ class DQN_Model:
         self.total_timesteps = total_timesteps
         self.model_type = model_type
 
-        # CRITICAL: Use different config for framed models
+        # Use default config for all DQN variants
         if config is None:
-            if model_type == 'framed':
-                self.config = self.get_framed_config()
-                print("[INFO] Using optimized config for frame stacking")
-            else:
-                self.config = self.get_default_config()
+            self.config = self.get_default_config()
         else:
             self.config = config
 
@@ -131,7 +151,7 @@ class DQN_Model:
         print(f"{'=' * 70}\n")
 
     def get_default_config(self) -> Dict[str, Any]:
-        """Default config for baseline and reward_shaped models"""
+        """Default config for all DQN models"""
         return {
             'learning_rate': 1e-4,
             'gamma': 0.99,
@@ -143,31 +163,6 @@ class DQN_Model:
             'exploration_initial_eps': 1.0,
             'exploration_final_eps': 0.05,
             'learning_starts': 10_000,
-            'gradient_steps': 1,
-            'tau': 1.0,
-        }
-
-    def get_framed_config(self) -> Dict[str, Any]:
-        """
-        CRITICAL: Optimized config for frame-stacked models.
-        Frame stacking increases memory by 4x (4 frames), so we need
-        a much smaller buffer to fit in available RAM.
-
-        For 64x64x12 observations:
-        - 100k buffer ≈ 4.7GB per observation type × 2 (obs + next_obs) ≈ 9.4GB
-        - 15k buffer ≈ 0.7GB per observation type × 2 ≈ 1.4GB (safe for 7GB RAM)
-        """
-        return {
-            'learning_rate': 1e-4,
-            'gamma': 0.99,
-            'train_freq': 4,
-            'buffer_size': 15_000,  # CRITICAL FIX: Reduced from 100k to 15k
-            'batch_size': 32,
-            'target_update_interval': 1_500,  # Proportionally reduced (15% of original)
-            'exploration_fraction': 0.1,
-            'exploration_initial_eps': 1.0,
-            'exploration_final_eps': 0.05,
-            'learning_starts': 1_500,  # Proportionally reduced (15% of original)
             'gradient_steps': 1,
             'tau': 1.0,
         }
@@ -193,24 +188,23 @@ class DQN_Model:
         total_mb = (bytes_per_obs * buffer_size * 2) / (1024 * 1024)  # *2 for obs + next_obs
         return f"{total_mb:.1f} MB"
 
-    def create_model(self, env, model_name: str = "dqn") -> DQN:
+    def create_model(self, env, model_name: str = "dqn"):
         device = "cuda" if torch.cuda.is_available() else "cpu"
-        print(f"\n✓ Creating DQN model on device: {device}")
+        print(f"\n✓ Creating {model_name} model on device: {device}")
         obs_space = env.observation_space
         print(f"Observation space: {obs_space}")
         print(f"Action space: {env.action_space}")
 
-        # Print memory-critical config for framed models
-        if self.model_type == 'framed':
-            print(f"\n[MEMORY CONFIG]")
-            print(f"  Buffer size: {self.config['buffer_size']:,}")
-            print(f"  Observation shape: {obs_space.shape}")
-            estimated_mem = self._estimate_buffer_memory(obs_space.shape, self.config['buffer_size'])
-            print(f"  Estimated buffer memory: {estimated_mem}")
+        # Print memory-critical config
+        print(f"\n[MEMORY CONFIG]")
+        print(f"  Buffer size: {self.config['buffer_size']:,}")
+        print(f"  Observation shape: {obs_space.shape}")
+        estimated_mem = self._estimate_buffer_memory(obs_space.shape, self.config['buffer_size'])
+        print(f"  Estimated buffer memory: {estimated_mem}")
 
-            # Check if we have enough memory
-            available_mem_gb = psutil.virtual_memory().available / (1024 ** 3)
-            print(f"  Available system memory: {available_mem_gb:.2f} GB")
+        # Check if we have enough memory
+        available_mem_gb = psutil.virtual_memory().available / (1024 ** 3)
+        print(f"  Available system memory: {available_mem_gb:.2f} GB")
 
         # Test the environment to make sure it works
         print("\n[DEBUG] Testing environment reset and step...")
@@ -234,12 +228,27 @@ class DQN_Model:
 
         # Use CNN policy for image observations
         policy = "CnnPolicy"
-        policy_kwargs = None
 
-        if self.model_type == 'framed':
-            # The default CNN policy should handle different channel sizes
-            print(f"[INFO] Using frame stacked observations with {obs_space.shape[2]} channels")
+        # Configure policy kwargs based on observation type
+        policy_kwargs = {}
 
+        # Check if this is a single-channel (grayscale) image
+        is_single_channel = (obs_space.shape[2] == 1 and obs_space.dtype == np.float32)
+
+        if is_single_channel:
+            print(f"[INFO] Detected single-channel normalized observations")
+            print(f"[INFO] Using custom SingleChannelCNN features extractor")
+
+            # Use custom CNN for single-channel images
+            policy_kwargs['features_extractor_class'] = SingleChannelCNN
+            policy_kwargs['features_extractor_kwargs'] = dict(features_dim=512)
+        elif obs_space.dtype == np.float32:
+            # Multi-channel normalized images
+            print(f"[INFO] Detected multi-channel normalized observations (float32)")
+            print(f"[INFO] Setting normalized_image=True for standard NatureCNN")
+            policy_kwargs['features_extractor_kwargs'] = dict(normalized_image=True)
+
+        # Standard DQN for all variants
         model = DQN(
             policy=policy,
             env=env,
@@ -258,15 +267,15 @@ class DQN_Model:
             tensorboard_log=self.log_path,
             verbose=1,
             device=device,
-            policy_kwargs=policy_kwargs
+            policy_kwargs=policy_kwargs if policy_kwargs else None
         )
+
         return model
 
     def create_callbacks(self, model_prefix: str):
         achievement_callback = AchievementCallback()
         tensorboard_print_callback = TensorBoardPrintCallback(print_freq=self.print_freq)
-        memory_callback = MemoryMonitorCallback(check_freq=1000, verbose=1)
-        return [achievement_callback, tensorboard_print_callback, memory_callback]
+        return [achievement_callback, tensorboard_print_callback]
 
     # -------------------------------
     # Training Methods
@@ -309,18 +318,34 @@ class DQN_Model:
         return model, env
 
     def baseline_dqn(self):
-        return self.train_model(make_crafter_env())
+        """
+        Baseline DQN with standard 64x64x3 RGB observations.
+        Iteration 1 - No improvements
+        """
+        return self.train_model(make_crafter_env)
 
     def reward_shaped_dqn(self):
-        return self.train_model(make_shaped_crafter_env())
+        """
+        DQN with reward shaping.
+        Iteration 2 - Improvement 1: Reward Shaping
+        """
+        return self.train_model(make_shaped_crafter_env)
 
-    def framed_dqn(self):
-        # Wrap the make_env function to ensure it's called correctly
-        def wrapped_make_env():
-            print("[INFO] Creating framed environment...")
-            return framed_make_crafter_env()
+    def preprocessed_shaped_dqn(self):
+        """
+        DQN with reward shaping AND image preprocessing.
+        Iteration 3 - Improvement 2: Grayscale + Normalize
 
-        return self.train_model(wrapped_make_env)
+        This combines both improvements:
+        - Improvement 1: Reward shaping
+        - Improvement 2: Image preprocessing (64x64x3 → 64x64x1, normalized to [0,1])
+
+        Benefits:
+        - 3x memory reduction
+        - Faster training
+        - Better gradient flow
+        """
+        return self.train_model(make_preprocessed_shaped_crafter_env)
 
 
 # -------------------------------
@@ -328,7 +353,8 @@ class DQN_Model:
 # -------------------------------
 def main():
     parser = argparse.ArgumentParser(description="Train DQN models for Crafter environment")
-    parser.add_argument('--model_type', type=str, choices=['baseline', 'reward_shaped', 'framed'],
+    parser.add_argument('--model_type', type=str,
+                        choices=['baseline', 'reward_shaped', 'preprocessed_shaped'],
                         required=True, help='Type of model to train')
     parser.add_argument('--log_path', type=str, default='./Training/Logs/DQN/',
                         help='Base directory for logs')
@@ -371,9 +397,12 @@ def main():
         config = dqn_model_temp.config.copy()
         config['buffer_size'] = args.buffer_size
         # Adjust related parameters proportionally
-        ratio = args.buffer_size / 100_000
-        config['target_update_interval'] = max(1000, int(10_000 * ratio))
-        config['learning_starts'] = max(1000, int(10_000 * ratio))
+        base_buffer = 100_000
+        ratio = args.buffer_size / base_buffer
+        base_target_update = 10_000
+        base_learning_starts = 10_000
+        config['target_update_interval'] = max(1000, int(base_target_update * ratio))
+        config['learning_starts'] = max(1000, int(base_learning_starts * ratio))
 
     # Create DQN trainer
     dqn_model = DQN_Model(
@@ -390,8 +419,8 @@ def main():
         model, env = dqn_model.baseline_dqn()
     elif args.model_type == 'reward_shaped':
         model, env = dqn_model.reward_shaped_dqn()
-    elif args.model_type == 'framed':
-        model, env = dqn_model.framed_dqn()
+    elif args.model_type == 'preprocessed_shaped':
+        model, env = dqn_model.preprocessed_shaped_dqn()
 
     env.close()
     print(f"\n{'=' * 70}")

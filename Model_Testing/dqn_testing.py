@@ -1,7 +1,7 @@
 # Dependencies
 import argparse
 from stable_baselines3 import DQN
-from stable_baselines3.common.vec_env import DummyVecEnv, VecFrameStack
+from stable_baselines3.common.vec_env import DummyVecEnv
 import os
 import sys
 import numpy as np
@@ -12,135 +12,44 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 from datetime import datetime
 import gymnasium as gym
-
+from shimmy import GymV21CompatibilityV0
+import gym as old_gym
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 try:
     import fix_numpy_compat
 except ImportError:
     pass
 
+try:
+    import crafter
+except ImportError:
+    print("Error: crafter package not found. Install with: pip install crafter")
+    sys.exit(1)
 
-class CrafterGymnasiumWrapper(gym.Env):
-    """Wrapper to make Crafter compatible with Gymnasium API"""
 
-    def __init__(self):
-        import crafter
-        self._env = crafter.Env()
+class GrayscaleNormalizeWrapper(gym.ObservationWrapper):
+    """
+    Combines grayscale conversion and normalization into one wrapper.
+    Must match the preprocessing used during training.
+    """
 
-        # Define spaces
+    def __init__(self, env):
+        super().__init__(env)
+        obs_shape = self.observation_space.shape
+        new_shape = (obs_shape[0], obs_shape[1], 1)
+
         self.observation_space = gym.spaces.Box(
-            low=0, high=255,
-            shape=self._env.observation_space.shape,
-            dtype=np.uint8
+            low=0.0,
+            high=1.0,
+            shape=new_shape,
+            dtype=np.float32
         )
-        self.action_space = gym.spaces.Discrete(self._env.action_space.n)
 
-        # Metadata for rendering
-        self.metadata = {'render_modes': ['rgb_array', 'human'], 'render_fps': 30}
-        self.render_mode = 'rgb_array'
-
-        self._last_obs = None
-
-    def reset(self, seed=None, options=None):
-        """Reset environment with Gymnasium API"""
-        if seed is not None:
-            np.random.seed(seed)
-
-        obs = self._env.reset()
-        self._last_obs = obs
-
-        # Return (observation, info) tuple as required by Gymnasium
-        info = {}
-        return obs, info
-
-    def step(self, action):
-        """Step with Gymnasium API (5-tuple return)"""
-        obs, reward, done, info = self._env.step(action)
-        self._last_obs = obs
-
-        # Convert to Gymnasium format: (obs, reward, terminated, truncated, info)
-        terminated = done
-        truncated = False  # Crafter doesn't use truncation
-
-        return obs, reward, terminated, truncated, info
-
-    def render(self):
-        """Render the current state"""
-        return self.get_frame()
-
-    def get_frame(self):
-        """Get RGB frame for video recording"""
-        try:
-            # Method 1: Try Crafter's internal image
-            if hasattr(self._env, '_image') and self._env._image is not None:
-                return self._env._image.copy()
-
-            # Method 2: Use last observation
-            if self._last_obs is not None:
-                return self._last_obs.copy()
-
-            # Method 3: Try _view attribute
-            if hasattr(self._env, '_view') and self._env._view is not None:
-                return self._env._view.copy()
-
-            return None
-        except Exception as e:
-            print(f"Frame capture error: {e}")
-            return None
-
-    def close(self):
-        """Close the environment"""
-        if hasattr(self._env, 'close'):
-            self._env.close()
-
-
-class VecFrameCaptureWrapper:
-    """
-    Wrapper to capture frames from VecFrameStack environment for video recording.
-    Extracts only the most recent frame from stacked observations.
-    """
-
-    def __init__(self, vec_env):
-        self.vec_env = vec_env
-        self._last_frame = None
-
-    def __getattr__(self, name):
-        """Delegate attribute access to wrapped environment"""
-        return getattr(self.vec_env, name)
-
-    def reset(self):
-        """Reset and capture initial frame"""
-        obs = self.vec_env.reset()
-        self._capture_current_frame(obs)
-        return obs
-
-    def step(self, actions):
-        """Step and capture frame"""
-        obs, rewards, dones, infos = self.vec_env.step(actions)
-        self._capture_current_frame(obs)
-        return obs, rewards, dones, infos
-
-    def _capture_current_frame(self, stacked_obs):
-        """Extract the most recent frame from stacked observation"""
-        # stacked_obs shape: (1, 12, 64, 64) for batch
-        # We want the last 3 channels (most recent frame)
-        try:
-            obs = stacked_obs[0]  # Remove batch dimension: (12, 64, 64)
-
-            # Last 3 channels are the most recent frame
-            recent_frame = obs[-3:, :, :]  # Shape: (3, 64, 64)
-
-            # Convert from (C, H, W) to (H, W, C) for video
-            frame = np.transpose(recent_frame, (1, 2, 0))  # Shape: (64, 64, 3)
-
-            self._last_frame = frame.astype(np.uint8)
-        except Exception as e:
-            print(f"Frame capture error: {e}")
-            self._last_frame = None
-
-    def get_current_frame(self):
-        """Get the most recently captured frame"""
-        return self._last_frame
+    def observation(self, obs):
+        """Convert RGB observation to grayscale and normalize"""
+        grayscale = np.dot(obs[..., :3], [0.299, 0.587, 0.114])
+        normalized = grayscale.astype(np.float32) / 255.0
+        return np.expand_dims(normalized, axis=-1)
 
 
 class DQN_Testing:
@@ -153,15 +62,14 @@ class DQN_Testing:
     """
 
     def __init__(self, model_path, num_episodes=100, video_dir="./crafter_videos/",
-                 results_dir="./results/", plots_dir="./plots/", use_frame_stacking=False,
-                 n_stack=4):
+                 results_dir="./results/", plots_dir="./plots/",
+                 use_preprocessing=False):
         self.model_path = model_path
         self.num_episodes = num_episodes
         self.video_dir = video_dir
         self.results_dir = results_dir
         self.plots_dir = plots_dir
-        self.use_frame_stacking = use_frame_stacking
-        self.n_stack = n_stack
+        self.use_preprocessing = use_preprocessing
 
         # Create directories
         os.makedirs(self.video_dir, exist_ok=True)
@@ -178,103 +86,55 @@ class DQN_Testing:
             "eat_cow", "eat_plant", "wake_up"
         ]
 
-    def _make_test_env(self):
+    def _make_test_env(self, episode_num=None, record_video=False):
         """
-        Create a testing environment.
+        Create a testing environment compatible with the training setup.
 
-        If use_frame_stacking=True, wraps the environment with frame stacking
-        to match the training configuration.
+        Args:
+            episode_num: Episode number for naming video files
+            record_video: Whether to record video for this episode
+
+        Returns:
+            Wrapped Crafter environment
         """
-        # Create base environment
-        base_env = CrafterGymnasiumWrapper()
+        # Create base Crafter environment (standard rewards, no reward shaping)
+        env = crafter.Env()
 
-        if self.use_frame_stacking:
-            # Wrap in DummyVecEnv (required for VecFrameStack)
-            vec_env = DummyVecEnv([lambda: base_env])
-
-            # Apply frame stacking
-            stacked_env = VecFrameStack(vec_env, n_stack=self.n_stack)
-
-            # Wrap with frame capture wrapper for video recording
-            env = VecFrameCaptureWrapper(stacked_env)
-
-            return env
-        else:
-            return base_env
-
-    def _save_video(self, frames, episode_num, model_name):
-        """Save video with fallback options"""
-        if not frames:
-            return
-
-        video_name = f"{model_name}_episode_{episode_num}"
-        mp4_saved = False
-
-        # Method 1: Try with imageio-ffmpeg (if available)
-        try:
-            video_path = os.path.join(self.video_dir, f"{video_name}.mp4")
-            imageio.mimsave(
-                video_path,
-                frames,
-                fps=30,
-                codec='libx264',
-                quality=8,
-                pixelformat='yuv420p',
+        # Use Crafter's built-in Recorder for video and stats
+        if record_video and episode_num is not None:
+            video_dir = os.path.join(self.video_dir, f"episode_{episode_num}")
+            env = crafter.Recorder(
+                env,
+                video_dir,
+                save_stats=True,
+                save_video=True,
+                save_episode=True
             )
-            print(f"✓ Video saved: {video_name}.mp4 ({len(frames)} frames)")
-            mp4_saved = True
-        except Exception as e:
-            pass
+        else:
+            # Just record stats without video
+            env = crafter.Recorder(
+                env,
+                self.results_dir,
+                save_stats=True,
+                save_video=False,
+                save_episode=False
+            )
 
-        # Method 2: Try with system ffmpeg via subprocess
-        if not mp4_saved:
-            try:
-                import subprocess
-                import tempfile
+        # Apply GymV21 compatibility wrapper (matches training setup)
+        env = GymV21CompatibilityV0(env=env)
 
-                # Save frames as temporary images
-                with tempfile.TemporaryDirectory() as tmpdir:
-                    # Save frames
-                    for i, frame in enumerate(frames):
-                        frame_path = os.path.join(tmpdir, f"frame_{i:06d}.png")
-                        imageio.imwrite(frame_path, frame)
+        # Apply preprocessing if required (matches training setup)
+        if self.use_preprocessing:
+            env = GrayscaleNormalizeWrapper(env)
 
-                    # Use ffmpeg to create video
-                    video_path = os.path.join(self.video_dir, f"{video_name}.mp4")
-                    cmd = [
-                        'ffmpeg', '-y',  # Overwrite output
-                        '-framerate', '30',
-                        '-i', os.path.join(tmpdir, 'frame_%06d.png'),
-                        '-c:v', 'libx264',
-                        '-pix_fmt', 'yuv420p',
-                        '-crf', '23',
-                        video_path
-                    ]
-
-                    result = subprocess.run(cmd, capture_output=True, text=True)
-                    if result.returncode == 0:
-                        print(f"✓ Video saved: {video_name}.mp4 ({len(frames)} frames)")
-                        mp4_saved = True
-
-            except Exception as e:
-                pass
-
-        # Fallback to GIF if MP4 fails
-        if not mp4_saved:
-            try:
-                gif_path = os.path.join(self.video_dir, f"{video_name}.gif")
-                imageio.mimsave(gif_path, frames, fps=30, loop=0)
-                print(f"✓ Video saved as GIF: {video_name}.gif ({len(frames)} frames)")
-                print("  Note: Install ffmpeg for MP4 support: conda install -c conda-forge ffmpeg")
-            except Exception as e:
-                print(f"✗ Failed to save video: {e}")
+        return env
 
     def test_dqn_model(self, model_type='baseline'):
         """
         Comprehensive evaluation of DQN model.
 
         Args:
-            model_type: 'baseline', 'framed', or 'improved'
+            model_type: 'baseline', 'reward_shaped', or 'preprocessed_shaped'
         """
         print(f"Loading model from: {self.model_path}")
         model = DQN.load(self.model_path)
@@ -288,85 +148,55 @@ class DQN_Testing:
 
         model_name_display = {
             'baseline': 'DQN Baseline',
-            'framed': 'DQN Frame Stacking',
-            'improved': 'DQN Fully Improved'
+            'reward_shaped': 'DQN Reward Shaped',
+            'preprocessed_shaped': 'DQN Preprocessed + Reward Shaped'
         }.get(model_type, f'DQN {model_type.title()}')
 
         print(f"\nTesting {model_name_display} Model over {self.num_episodes} episodes...")
         print("=" * 70)
         print("EVALUATION ON STANDARD REWARDS")
-        if self.use_frame_stacking:
-            print(f"Using frame stacking: {self.n_stack} frames")
-        if model_type in ['improved', 'framed']:
+        if self.use_preprocessing:
+            print("Using preprocessing: Grayscale + Normalization")
+        if model_type in ['reward_shaped', 'preprocessed_shaped']:
             print("Model was trained WITH improvements, but evaluated WITHOUT reward shaping.")
         print("=" * 70)
 
         first_high_achievement_recorded = False
 
         for episode in range(self.num_episodes):
-            env = self._make_test_env()
+            # Determine if we should record video for this episode
+            record_video = not first_high_achievement_recorded
 
-            # Handle both regular and vectorized environments
-            if self.use_frame_stacking:
-                obs = env.reset()
-                terminated = np.array([False])
-                truncated = np.array([False])
-            else:
-                obs, info = env.reset()
-                terminated = False
-                truncated = False
+            env = self._make_test_env(episode_num=episode + 1, record_video=record_video)
+
+            obs, info = env.reset()
+            done = False
 
             episode_reward = 0
             step = 0
             episode_achievements = set()
 
-            # Always collect frames
-            episode_frames = []
-
-            # Capture initial frame
-            if self.use_frame_stacking:
-                frame = env.get_current_frame()
-            else:
-                frame = env.get_frame()
-
-            if frame is not None:
-                episode_frames.append(frame)
-
-            while not (terminated.any() if isinstance(terminated, np.ndarray) else terminated):
+            while not done:
                 # Predict action
                 action, _ = model.predict(obs, deterministic=True)
-
-                if self.use_frame_stacking:
-                    # For vectorized env, action is already an array
-                    action_counts[int(action[0])] += 1
-                else:
-                    action_counts[int(action)] += 1
+                action_counts[int(action)] += 1
 
                 # Step environment
-                if self.use_frame_stacking:
-                    obs, reward, done, infos = env.step(action)
-                    reward = reward[0]
-                    terminated = done
-                    truncated = np.array([False])
-                    info = infos[0]
-                else:
-                    obs, reward, terminated, truncated, info = env.step(action)
+                obs, reward, terminated, truncated, info = env.step(action)
+                done = terminated or truncated
 
                 episode_reward += reward
                 step += 1
 
-                # Capture frame
-                if self.use_frame_stacking:
-                    frame = env.get_current_frame()
-                else:
-                    frame = env.get_frame()
-
-                if frame is not None:
-                    episode_frames.append(frame)
-
-                # Track achievements
+                # Track achievements (info might have 'semantic' with achievements)
                 if 'achievements' in info:
                     for achievement, unlocked in info['achievements'].items():
+                        if unlocked and achievement not in episode_achievements:
+                            achievement_unlocks[achievement] += 1
+                            episode_achievements.add(achievement)
+                elif 'semantic' in info and isinstance(info['semantic'], dict):
+                    # Some Crafter versions use 'semantic' key
+                    for achievement, unlocked in info['semantic'].items():
                         if unlocked and achievement not in episode_achievements:
                             achievement_unlocks[achievement] += 1
                             episode_achievements.add(achievement)
@@ -375,28 +205,23 @@ class DQN_Testing:
             episode_lengths.append(step)
             achievement_per_episode.append(len(episode_achievements))
 
-            # Save video ONLY for the first episode with 11+ achievements
+            # Mark that we recorded a high achievement episode
             num_achievements = len(episode_achievements)
-            if not first_high_achievement_recorded and num_achievements >= 11 and episode_frames:
+            if not first_high_achievement_recorded and num_achievements >= 11 and record_video:
                 print(f"\n{'=' * 70}")
                 print(f"🎉 HIGH ACHIEVEMENT EPISODE DETECTED! ({num_achievements} achievements)")
-                print(f"{'=' * 70}")
-                self._save_video(episode_frames, episode + 1,
-                                 f"dqn_{model_type}_best")
-                first_high_achievement_recorded = True
+                print(f"Video saved to: {os.path.join(self.video_dir, f'episode_{episode + 1}')}")
                 print(f"{'=' * 70}\n")
+                first_high_achievement_recorded = True
 
+            status_marker = ' ⭐ RECORDED!' if (not first_high_achievement_recorded and num_achievements >= 11 and record_video) else ''
             print(f"Episode {episode + 1:3d}/{self.num_episodes}: "
                   f"Reward={episode_reward:6.2f}, "
                   f"Steps={step:4d}, "
                   f"Achievements={len(episode_achievements):2d}"
-                  f"{' ⭐ RECORDED!' if (not first_high_achievement_recorded and num_achievements >= 11) else ''}")
+                  f"{status_marker}")
 
-            # Close environment
-            if self.use_frame_stacking:
-                env.close()
-            else:
-                env.close()
+            env.close()
 
         # Calculate metrics
         avg_reward = np.mean(episode_rewards)
@@ -447,8 +272,7 @@ class DQN_Testing:
             "num_episodes": self.num_episodes,
             "timestamp": datetime.now().isoformat(),
             "evaluation_type": "STANDARD_REWARDS",
-            "frame_stacking": self.use_frame_stacking,
-            "n_stack": self.n_stack if self.use_frame_stacking else None,
+            "preprocessing": self.use_preprocessing,
             "metrics": {
                 "average_reward": float(avg_reward),
                 "std_reward": float(std_reward),
@@ -554,14 +378,13 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Test DQN models on Crafter')
     parser.add_argument('--model_path', type=str, required=True,
                         help='Path to the trained model')
-    parser.add_argument('--model_type', type=str, choices=['baseline', 'improved', 'framed'],
+    parser.add_argument('--model_type', type=str,
+                        choices=['baseline', 'reward_shaped', 'preprocessed_shaped'],
                         default='baseline', help='Type of model to test')
-    parser.add_argument('--num_episodes', type=int, default=100,
+    parser.add_argument('--num_episodes', type=int, default=200,
                         help='Number of episodes to test')
-    parser.add_argument('--use_frame_stacking', action='store_true',
-                        help='Use frame stacking (required for models trained with frame stacking)')
-    parser.add_argument('--n_stack', type=int, default=4,
-                        help='Number of frames to stack (if using frame stacking)')
+    parser.add_argument('--use_preprocessing', action='store_true',
+                        help='Use grayscale+normalization preprocessing (required for preprocessed_shaped model)')
     parser.add_argument('--video_dir', type=str, default='./crafter_videos/',
                         help='Directory to save videos')
     parser.add_argument('--results_dir', type=str, default='./results/',
@@ -571,10 +394,10 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
 
-    # Auto-detect frame stacking for 'framed' and 'improved' models
-    if args.model_type in ['framed', 'improved']:
-        args.use_frame_stacking = True
-        print(f"Note: Automatically enabled frame stacking for '{args.model_type}' model")
+    # Auto-detect preprocessing for 'preprocessed_shaped' model
+    if args.model_type == 'preprocessed_shaped':
+        args.use_preprocessing = True
+        print(f"Note: Automatically enabled preprocessing for '{args.model_type}' model")
 
     tester = DQN_Testing(
         model_path=args.model_path,
@@ -582,8 +405,7 @@ if __name__ == "__main__":
         video_dir=args.video_dir,
         results_dir=args.results_dir,
         plots_dir=args.plots_dir,
-        use_frame_stacking=args.use_frame_stacking,
-        n_stack=args.n_stack
+        use_preprocessing=args.use_preprocessing
     )
 
     # Run test

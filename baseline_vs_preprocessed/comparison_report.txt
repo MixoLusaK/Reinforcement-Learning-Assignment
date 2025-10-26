@@ -1,0 +1,113 @@
+================================================================================
+COMPREHENSIVE MODEL COMPARISON REPORT
+================================================================================
+Generated: 2025-10-26 18:38:49
+Comparison Type: Baseline Vs Preprocessed
+Models Compared: 2
+Baseline Model: Baseline
+================================================================================
+
+MODEL OVERVIEW
+--------------------------------------------------------------------------------
+
+1. Baseline [BASELINE]
+   Model Type: DQN Baseline
+   Episodes Evaluated: 200
+   Evaluation Type: STANDARD_REWARDS
+   Preprocessing: False
+   Timestamp: 2025-10-26T17:30:29.710708
+
+2. Preprocessed
+   Model Type: DQN Preprocessed + Reward Shaped
+   Episodes Evaluated: 200
+   Evaluation Type: STANDARD_REWARDS
+   Preprocessing: True
+   Timestamp: 2025-10-26T18:15:54.804187
+
+================================================================================
+PERFORMANCE METRICS SUMMARY
+================================================================================
+
+Model                            Avg Reward    Avg Ach     Survival    Geom Mean
+--------------------------------------------------------------------------------
+Baseline                       *        4.97       5.87        196.9     0.187023
+Preprocessed                          5.51       6.42        218.6     0.351380
+
+================================================================================
+RELATIVE IMPROVEMENTS (vs Baseline)
+================================================================================
+
+
+Preprocessed:
+  Reward: +10.87%
+  Achievements: +9.37%
+  Survival: +11.03%
+  Geometric Mean: +87.88%
+
+================================================================================
+TOP 10 ACHIEVEMENTS (by unlock rate)
+================================================================================
+
+
+Baseline:
+  collect_sapling                 97.50%
+  place_plant                     94.00%
+  collect_wood                    92.00%
+  place_table                     78.00%
+  collect_drink                   71.50%
+  wake_up                         67.50%
+  eat_cow                         33.00%
+  make_wood_sword                 22.50%
+  defeat_zombie                   15.50%
+  make_wood_pickaxe               12.50%
+
+Preprocessed:
+  collect_sapling                 97.50%
+  collect_wood                    96.00%
+  place_plant                     93.00%
+  place_table                     83.00%
+  wake_up                         76.50%
+  collect_drink                   65.50%
+  defeat_zombie                   65.50%
+  eat_cow                         60.50%
+  make_wood_pickaxe                4.00%
+  defeat_skeleton                  0.50%
+
+================================================================================
+ACHIEVEMENT UNLOCK RATE CHANGES (vs Baseline)
+================================================================================
+
+
+Preprocessed:
+  Largest Improvements:
+    defeat_zombie                  +50.00 pp
+    eat_cow                        +27.50 pp
+    wake_up                         +9.00 pp
+    place_table                     +5.00 pp
+    collect_wood                    +4.00 pp
+  Largest Declines:
+    place_plant                     -1.00 pp
+    collect_stone                   -1.50 pp
+    collect_drink                   -6.00 pp
+    make_wood_pickaxe               -8.50 pp
+    make_wood_sword                -22.50 pp
+
+================================================================================
+SUMMARY AND RECOMMENDATIONS
+================================================================================
+
+Best Average Reward: Preprocessed
+Best Achievement Count: Preprocessed
+Best Survival Time: Preprocessed
+Best Overall Score (Geometric Mean): Preprocessed
+
+Comparison Insights (baseline_vs_preprocessed):
+  Preprocessed vs Baseline:
+    Metrics improved: 3/3
+    Reward: ✓ Better
+    Achievements: ✓ Better
+    Survival: ✓ Better
+
+================================================================================
+END OF REPORT
+================================================================================
