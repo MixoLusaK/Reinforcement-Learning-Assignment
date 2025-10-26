@@ -2,7 +2,7 @@
 
 This project demonstrates **training and evaluating reinforcement learning (RL) agents** on the [Crafter](https://github.com/danijar/crafter) environment using [Stable-Baselines3 (SB3)](https://stable-baselines3.readthedocs.io/).  
 
-The main goal is to help students and researchers learn how to:
+The main goal is learn how to:
 - Train an RL agent on a **partially observable environment (POMDP)**  
 - Incorporate **improvements** such as reward shaping and image preprocessing  
 - Compare performance between **PPO** (Proximal Policy Optimization) and **DQN** agents  
