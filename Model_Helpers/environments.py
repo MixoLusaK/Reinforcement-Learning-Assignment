@@ -1,11 +1,9 @@
 import os
-import gymnasium as gym
+import gym
 import crafter
-from gymnasium.envs.registration import register
+from gym.envs.registration import register
 from shimmy import GymV21CompatibilityV0
-from gym.wrappers import FrameStack
-from .frame_wrapper import FrameStackWrapper
-
+from .image_preprocessing import GrayscaleNormalizeWrapper
 
 try:
     from .belief_reward_shaping import BeliefRewardWrapper
@@ -32,10 +30,8 @@ def make_env(log_dir='./Training/Logs/jsons/',
     """
     os.makedirs(log_dir, exist_ok=True)
 
-    # Create base environment directly from the local crafter package
-    # Avoid using `gym.make` (gymnasium) because the local `crafter.Env`
-    # may not subclass `gymnasium.Env` and would trigger a type check error.
-    env = crafter.Env()
+    # Create base environment
+    env = gym.make("CrafterPartial-v1")
 
     # Apply Recorder wrapper
     env = crafter.Recorder(
@@ -97,23 +93,15 @@ def make_shaped_env(log_dir='./Training/Logs/jsons_shaped/',
 
     return env
 
-def framed_make_env(log_dir='./Training/Logs/jsons_framed/',
-                    lambda_param=1000,
-                    health_weight=0.1,
-                    clip_belief_reward=True,
-                    use_clusters=True,
-                    save_video=False,
+
+def make_preprocessed_shaped_env(log_dir='./Training/Logs/jsons_processed/', save_video=False,
                     save_episode=False):
     """
-    Create Crafter environment WITH BOTH reward shaping AND frame stacking.
-    Uses a different approach to avoid compatibility issues.
+    Used for: DQN + Reward Shaping + Preprocessing (Iteration 3)
     """
     os.makedirs(log_dir, exist_ok=True)
-
-    # Create base environment
     env = gym.make("CrafterPartial-v1")
 
-    # Apply Recorder wrapper
     env = crafter.Recorder(
         env,
         log_dir,
@@ -121,22 +109,10 @@ def framed_make_env(log_dir='./Training/Logs/jsons_framed/',
         save_video=save_video,
         save_episode=save_episode
     )
-
-
     env = GymV21CompatibilityV0(env=env)
+    env = BeliefRewardWrapper(env)
 
-    if BeliefRewardWrapper is not None:
-        env = BeliefRewardWrapper(
-            env,
-            lambda_param=lambda_param,
-            health_weight=health_weight,
-            clip_belief_reward=clip_belief_reward,
-            use_clusters=use_clusters
-        )
-    else:
-        print("WARNING: BeliefRewardWrapper not available, using standard environment")
-
-    env = FrameStackWrapper(env, k=4)
+    # Improvement 2: Preprocessing
+    env = GrayscaleNormalizeWrapper(env)
 
     return env
-
