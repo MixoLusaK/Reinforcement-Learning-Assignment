@@ -1,11 +1,11 @@
 # Dependencies
 import argparse
 from stable_baselines3 import DQN
+from stable_baselines3.common.evaluation import evaluate_policy
 from stable_baselines3.common.vec_env import DummyVecEnv
 import os
 import sys
 import numpy as np
-import imageio
 import json
 from collections import defaultdict
 import matplotlib.pyplot as plt
@@ -14,11 +14,20 @@ from datetime import datetime
 import gymnasium as gym
 from shimmy import GymV21CompatibilityV0
 import gym as old_gym
+from gym.envs.registration import register
+import warnings
+warnings.filterwarnings('ignore', message='.*Gym has been unmaintained.*')
+
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 try:
     import fix_numpy_compat
 except ImportError:
     pass
+
+register(
+    id='CrafterPartial-v1',
+    entry_point='crafter:Env',
+)
 
 try:
     import crafter
@@ -54,22 +63,19 @@ class GrayscaleNormalizeWrapper(gym.ObservationWrapper):
 
 class DQN_Testing:
     """
-    Class to test DQN models on Crafter environment.
-
-    CRITICAL: Tests are conducted on the STANDARD environment (without reward shaping)
-    to comply with restriction 5c: "for all evaluation you do, please include
-    performance on the standard rewards and achievement unlock rates."
+    Class to test DQN models on Crafter environment using evaluate_policy.
     """
 
     def __init__(self, model_path, num_episodes=100, video_dir="./crafter_videos/",
                  results_dir="./results/", plots_dir="./plots/",
-                 use_preprocessing=False):
+                 use_preprocessing=False, use_evaluate_policy=True):
         self.model_path = model_path
         self.num_episodes = num_episodes
         self.video_dir = video_dir
         self.results_dir = results_dir
         self.plots_dir = plots_dir
         self.use_preprocessing = use_preprocessing
+        self.use_evaluate_policy = use_evaluate_policy
 
         # Create directories
         os.makedirs(self.video_dir, exist_ok=True)
@@ -86,32 +92,19 @@ class DQN_Testing:
             "eat_cow", "eat_plant", "wake_up"
         ]
 
-    def _make_test_env(self, episode_num=None, record_video=False):
+    def _make_test_env(self, record_stats=True):
         """
         Create a testing environment compatible with the training setup.
-
-        Args:
-            episode_num: Episode number for naming video files
-            record_video: Whether to record video for this episode
-
-        Returns:
-            Wrapped Crafter environment
         """
         # Create base Crafter environment (standard rewards, no reward shaping)
-        env = crafter.Env()
+        env = old_gym.make("CrafterPartial-v1")
 
-        # Use Crafter's built-in Recorder for video and stats
-        if record_video and episode_num is not None:
-            video_dir = os.path.join(self.video_dir, f"episode_{episode_num}")
-            env = crafter.Recorder(
-                env,
-                video_dir,
-                save_stats=True,
-                save_video=True,
-                save_episode=True
-            )
-        else:
-            # Just record stats without video
+        # Ensure metadata is set properly
+        if not hasattr(env, 'metadata') or env.metadata is None:
+            env.metadata = {'render_modes': ['rgb_array']}
+
+        # Use Crafter's built-in Recorder for stats tracking
+        if record_stats:
             env = crafter.Recorder(
                 env,
                 self.results_dir,
@@ -120,21 +113,75 @@ class DQN_Testing:
                 save_episode=False
             )
 
-        # Apply GymV21 compatibility wrapper (matches training setup)
+        # Apply GymV21 compatibility wrapper
         env = GymV21CompatibilityV0(env=env)
 
-        # Apply preprocessing if required (matches training setup)
+        # Apply preprocessing if required
         if self.use_preprocessing:
             env = GrayscaleNormalizeWrapper(env)
 
         return env
 
-    def test_dqn_model(self, model_type='baseline'):
+    def test_with_evaluate_policy(self, model_type='baseline'):
         """
-        Comprehensive evaluation of DQN model.
+        Test using Stable Baselines3's evaluate_policy function.
+        This is simpler but provides less detailed metrics.
+        """
+        print(f"Loading model from: {self.model_path}")
+        model = DQN.load(self.model_path)
 
-        Args:
-            model_type: 'baseline', 'reward_shaped', or 'preprocessed_shaped'
+        model_name_display = {
+            'baseline': 'DQN Baseline',
+            'reward_shaped': 'DQN Reward Shaped',
+            'preprocessed_shaped': 'DQN Preprocessed + Reward Shaped'
+        }.get(model_type, f'DQN {model_type.title()}')
+
+        print(f"\nTesting {model_name_display} Model using evaluate_policy...")
+        print("=" * 70)
+
+        # Create evaluation environment
+        eval_env = self._make_test_env(record_stats=True)
+
+        # Use evaluate_policy for quick evaluation
+        mean_reward, std_reward = evaluate_policy(
+            model,
+            eval_env,
+            n_eval_episodes=self.num_episodes,
+            deterministic=True,
+            return_episode_rewards=False
+        )
+
+        print(f"\nEvaluation Results:")
+        print(f"  Mean Reward: {mean_reward:.2f} ± {std_reward:.2f}")
+        print(f"  Episodes: {self.num_episodes}")
+
+        # Save basic results
+        results = {
+            "model": model_name_display,
+            "num_episodes": self.num_episodes,
+            "timestamp": datetime.now().isoformat(),
+            "evaluation_method": "evaluate_policy",
+            "preprocessing": self.use_preprocessing,
+            "metrics": {
+                "mean_reward": float(mean_reward),
+                "std_reward": float(std_reward),
+            }
+        }
+
+        results_path = os.path.join(self.results_dir, f"dqn_{model_type}_evaluate_policy_results.json")
+        with open(results_path, 'w') as f:
+            json.dump(results, f, indent=2)
+
+        print(f"✓ Results saved to: {results_path}")
+        print("=" * 70)
+
+        eval_env.close()
+        return results
+
+    def test_with_detailed_tracking(self, model_type='baseline'):
+        """
+        Test with detailed achievement and action tracking.
+        This is your original implementation with more metrics.
         """
         print(f"Loading model from: {self.model_path}")
         model = DQN.load(self.model_path)
@@ -152,50 +199,44 @@ class DQN_Testing:
             'preprocessed_shaped': 'DQN Preprocessed + Reward Shaped'
         }.get(model_type, f'DQN {model_type.title()}')
 
-        print(f"\nTesting {model_name_display} Model over {self.num_episodes} episodes...")
+        print(f"\nTesting {model_name_display} Model with detailed tracking...")
         print("=" * 70)
-        print("EVALUATION ON STANDARD REWARDS")
-        if self.use_preprocessing:
-            print("Using preprocessing: Grayscale + Normalization")
-        if model_type in ['reward_shaped', 'preprocessed_shaped']:
-            print("Model was trained WITH improvements, but evaluated WITHOUT reward shaping.")
-        print("=" * 70)
-
-        first_high_achievement_recorded = False
 
         for episode in range(self.num_episodes):
-            # Determine if we should record video for this episode
-            record_video = not first_high_achievement_recorded
+            env = self._make_test_env(record_stats=True)
+            obs = env.reset()
+            if isinstance(obs, tuple):
+                obs, info = obs
+            else:
+                info = {}
 
-            env = self._make_test_env(episode_num=episode + 1, record_video=record_video)
-
-            obs, info = env.reset()
             done = False
-
             episode_reward = 0
             step = 0
             episode_achievements = set()
 
             while not done:
-                # Predict action
                 action, _ = model.predict(obs, deterministic=True)
                 action_counts[int(action)] += 1
 
-                # Step environment
-                obs, reward, terminated, truncated, info = env.step(action)
-                done = terminated or truncated
+                step_result = env.step(action)
+
+                if len(step_result) == 5:
+                    obs, reward, terminated, truncated, info = step_result
+                    done = terminated or truncated
+                else:
+                    obs, reward, done, info = step_result
 
                 episode_reward += reward
                 step += 1
 
-                # Track achievements (info might have 'semantic' with achievements)
+                # Track achievements
                 if 'achievements' in info:
                     for achievement, unlocked in info['achievements'].items():
                         if unlocked and achievement not in episode_achievements:
                             achievement_unlocks[achievement] += 1
                             episode_achievements.add(achievement)
                 elif 'semantic' in info and isinstance(info['semantic'], dict):
-                    # Some Crafter versions use 'semantic' key
                     for achievement, unlocked in info['semantic'].items():
                         if unlocked and achievement not in episode_achievements:
                             achievement_unlocks[achievement] += 1
@@ -205,21 +246,10 @@ class DQN_Testing:
             episode_lengths.append(step)
             achievement_per_episode.append(len(episode_achievements))
 
-            # Mark that we recorded a high achievement episode
-            num_achievements = len(episode_achievements)
-            if not first_high_achievement_recorded and num_achievements >= 11 and record_video:
-                print(f"\n{'=' * 70}")
-                print(f"🎉 HIGH ACHIEVEMENT EPISODE DETECTED! ({num_achievements} achievements)")
-                print(f"Video saved to: {os.path.join(self.video_dir, f'episode_{episode + 1}')}")
-                print(f"{'=' * 70}\n")
-                first_high_achievement_recorded = True
-
-            status_marker = ' ⭐ RECORDED!' if (not first_high_achievement_recorded and num_achievements >= 11 and record_video) else ''
             print(f"Episode {episode + 1:3d}/{self.num_episodes}: "
                   f"Reward={episode_reward:6.2f}, "
                   f"Steps={step:4d}, "
-                  f"Achievements={len(episode_achievements):2d}"
-                  f"{status_marker}")
+                  f"Achievements={len(episode_achievements):2d}")
 
             env.close()
 
@@ -245,13 +275,13 @@ class DQN_Testing:
         print("\n" + "=" * 70)
         print(f"EVALUATION SUMMARY - {model_name_display.upper()}")
         print("=" * 70)
-        print(f"\nPerformance Metrics (STANDARD REWARDS):")
+        print(f"\nPerformance Metrics:")
         print(f"  Average Cumulative Reward:     {avg_reward:8.2f} ± {std_reward:.2f}")
         print(f"  Average Survival Time:         {avg_survival_time:8.2f} ± {std_survival_time:.2f} steps")
         print(f"  Average Achievements/Episode:  {avg_achievements:8.2f}")
         print(f"  Geometric Mean of Achievements: {geometric_mean:7.4f}")
 
-        print(f"\nAchievement Unlock Rates (All {len(self.all_achievements)} Achievements):")
+        print(f"\nAchievement Unlock Rates:")
         sorted_achievements = sorted(achievement_rates.items(), key=lambda x: x[1], reverse=True)
         for achievement, rate in sorted_achievements:
             count = achievement_unlocks.get(achievement, 0)
@@ -259,19 +289,19 @@ class DQN_Testing:
             bar = bar.ljust(50)
             print(f"  {achievement:30s}: {rate * 100:5.1f}% [{bar}] ({count:3d}/{self.num_episodes})")
 
-        # Create visualizations
-        print("\nGenerating visualizations...")
-        self.create_visualizations(
-            episode_rewards, episode_lengths, achievement_per_episode,
-            achievement_rates, action_counts, model_name=model_type
-        )
+        # Skip visualizations for now
+        # print("\nGenerating visualizations...")
+        # self.create_visualizations(
+        #     episode_rewards, episode_lengths, achievement_per_episode,
+        #     achievement_rates, action_counts, model_name=model_type
+        # )
 
         # Save results
         results = {
             "model": model_name_display,
             "num_episodes": self.num_episodes,
             "timestamp": datetime.now().isoformat(),
-            "evaluation_type": "STANDARD_REWARDS",
+            "evaluation_method": "detailed_tracking",
             "preprocessing": self.use_preprocessing,
             "metrics": {
                 "average_reward": float(avg_reward),
@@ -288,7 +318,7 @@ class DQN_Testing:
             "achievements_per_episode": achievement_per_episode
         }
 
-        results_path = os.path.join(self.results_dir, f"dqn_{model_type}_results.json")
+        results_path = os.path.join(self.results_dir, f"dqn_{model_type}_detailed_results.json")
         with open(results_path, 'w') as f:
             json.dump(results, f, indent=2)
 
@@ -311,7 +341,7 @@ class DQN_Testing:
         axes[0, 0].axhline(np.mean(episode_rewards), color='red', linestyle='--',
                            label=f'Mean: {np.mean(episode_rewards):.2f}')
         axes[0, 0].set_xlabel('Episode')
-        axes[0, 0].set_ylabel('Cumulative Reward (Standard)')
+        axes[0, 0].set_ylabel('Cumulative Reward')
         axes[0, 0].set_title(f'Episode Rewards - {model_name.title()} Model')
         axes[0, 0].legend()
         axes[0, 0].grid(True, alpha=0.3)
@@ -384,7 +414,11 @@ if __name__ == "__main__":
     parser.add_argument('--num_episodes', type=int, default=200,
                         help='Number of episodes to test')
     parser.add_argument('--use_preprocessing', action='store_true',
-                        help='Use grayscale+normalization preprocessing (required for preprocessed_shaped model)')
+                        help='Use grayscale+normalization preprocessing')
+    parser.add_argument('--evaluation_method', type=str,
+                        choices=['evaluate_policy', 'detailed'],
+                        default='detailed',
+                        help='Evaluation method: evaluate_policy (fast) or detailed (full metrics)')
     parser.add_argument('--video_dir', type=str, default='./crafter_videos/',
                         help='Directory to save videos')
     parser.add_argument('--results_dir', type=str, default='./results/',
@@ -394,7 +428,6 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
 
-    # Auto-detect preprocessing for 'preprocessed_shaped' model
     if args.model_type == 'preprocessed_shaped':
         args.use_preprocessing = True
         print(f"Note: Automatically enabled preprocessing for '{args.model_type}' model")
@@ -408,5 +441,8 @@ if __name__ == "__main__":
         use_preprocessing=args.use_preprocessing
     )
 
-    # Run test
-    results = tester.test_dqn_model(model_type=args.model_type)
+    # Run test based on evaluation method
+    if args.evaluation_method == 'evaluate_policy':
+        results = tester.test_with_evaluate_policy(model_type=args.model_type)
+    else:
+        results = tester.test_with_detailed_tracking(model_type=args.model_type)

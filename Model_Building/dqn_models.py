@@ -5,7 +5,6 @@ from datetime import datetime
 from typing import Dict, Any, Optional
 import numpy as np
 import torch
-import torch.nn as nn
 from stable_baselines3 import DQN
 from stable_baselines3.common.callbacks import BaseCallback
 from stable_baselines3.common.torch_layers import BaseFeaturesExtractor
@@ -13,113 +12,11 @@ import psutil
 from Model_Helpers.environments import make_env as make_crafter_env
 from Model_Helpers.environments import make_shaped_env as make_shaped_crafter_env
 from Model_Helpers.environments import make_preprocessed_shaped_env as make_preprocessed_shaped_crafter_env
+from Model_Helpers.environments import make_framestack_env as make_framestack_crafter_env
+from Model_Helpers.single_cnn_channel import SingleChannelCNN
+from Model_Helpers.call_backs import AchievementCallback, TensorBoardPrintCallback
 
 
-# -------------------------------
-# Custom CNN for Single-Channel Images
-# -------------------------------
-class SingleChannelCNN(BaseFeaturesExtractor):
-    """
-    Custom CNN architecture for single-channel (grayscale) images.
-
-    This is similar to NatureCNN but adapted for single-channel inputs.
-    Architecture:
-    - Conv2d(1, 32, kernel_size=8, stride=4)
-    - Conv2d(32, 64, kernel_size=4, stride=2)
-    - Conv2d(64, 64, kernel_size=3, stride=1)
-    - Flatten -> Linear(features_dim)
-    """
-
-    def __init__(self, observation_space, features_dim: int = 512):
-        super().__init__(observation_space, features_dim)
-
-        # Extract input dimensions
-        n_input_channels = observation_space.shape[2]  # Should be 1 for grayscale
-
-        print(f"[CNN] Building custom CNN for single-channel images")
-        print(f"[CNN] Input channels: {n_input_channels}")
-        print(f"[CNN] Input shape: {observation_space.shape}")
-
-        self.cnn = nn.Sequential(
-            nn.Conv2d(n_input_channels, 32, kernel_size=8, stride=4, padding=0),
-            nn.ReLU(),
-            nn.Conv2d(32, 64, kernel_size=4, stride=2, padding=0),
-            nn.ReLU(),
-            nn.Conv2d(64, 64, kernel_size=3, stride=1, padding=0),
-            nn.ReLU(),
-            nn.Flatten(),
-        )
-
-        # Compute shape by doing one forward pass
-        with torch.no_grad():
-            # Transpose to (batch, channels, height, width) format
-            sample = torch.as_tensor(observation_space.sample()[None]).float()
-            # Reshape from (1, H, W, C) to (1, C, H, W)
-            sample = sample.permute(0, 3, 1, 2)
-            n_flatten = self.cnn(sample).shape[1]
-
-        print(f"[CNN] Flattened features: {n_flatten}")
-
-        self.linear = nn.Sequential(
-            nn.Linear(n_flatten, features_dim),
-            nn.ReLU()
-        )
-
-    def forward(self, observations: torch.Tensor) -> torch.Tensor:
-        # Input shape: (batch, height, width, channels)
-        # Need: (batch, channels, height, width)
-        observations = observations.permute(0, 3, 1, 2)
-        return self.linear(self.cnn(observations))
-
-
-# -------------------------------
-# Callbacks
-# -------------------------------
-class AchievementCallback(BaseCallback):
-    """Log achievement statistics during training"""
-
-    def __init__(self, verbose=0):
-        super().__init__(verbose)
-        self.achievements_history = []
-
-    def _on_step(self) -> bool:
-        if self.locals.get('dones'):
-            for done, info in zip(self.locals['dones'], self.locals['infos']):
-                if done and 'achievements' in info:
-                    episode_unlocks = sum(1 for unlocked in info['achievements'].values() if unlocked)
-                    self.achievements_history.append(episode_unlocks)
-                    self.logger.record('achievements/per_episode', episode_unlocks)
-                    if len(self.achievements_history) >= 100:
-                        self.logger.record('achievements/mean_last_100', np.mean(self.achievements_history[-100:]))
-        return True
-
-
-class TensorBoardPrintCallback(BaseCallback):
-    """Print TensorBoard metrics to console during training"""
-
-    def __init__(self, print_freq: int = 100, verbose=0):
-        super().__init__(verbose)
-        self.print_freq = print_freq
-        self.episode_rewards = []
-        self.episode_lengths = []
-
-    def _on_step(self) -> bool:
-        # Collect episode statistics
-        if self.locals.get('dones'):
-            for idx, done in enumerate(self.locals['dones']):
-                if done:
-                    info = self.locals['infos'][idx]
-                    if 'episode' in info:
-                        self.episode_rewards.append(info['episode']['r'])
-                        self.episode_lengths.append(info['episode']['l'])
-        return True
-
-
-
-
-# -------------------------------
-# DQN Model Class
-# -------------------------------
 class DQN_Model:
     """Create and train DQN models for Crafter"""
 
@@ -182,10 +79,9 @@ class DQN_Model:
 
     def _estimate_buffer_memory(self, obs_shape, buffer_size):
         """Estimate replay buffer memory usage"""
-        bytes_per_obs = np.prod(obs_shape)
-        # Buffer stores: observations, next_observations, actions, rewards, dones
-        # The big memory users are obs and next_obs (both same size)
-        total_mb = (bytes_per_obs * buffer_size * 2) / (1024 * 1024)  # *2 for obs + next_obs
+        bytes_per_obs = np.prod(obs_shape) * 4  # float32 = 4 bytes
+        # Buffer stores obs + next_obs
+        total_mb = (bytes_per_obs * buffer_size * 2) / (1024 * 1024)
         return f"{total_mb:.1f} MB"
 
     def create_model(self, env, model_name: str = "dqn"):
@@ -216,8 +112,10 @@ class DQN_Model:
             if hasattr(test_obs, '__array__'):
                 test_obs_array = np.array(test_obs)
                 print(f"[DEBUG] Obs shape: {test_obs_array.shape}, dtype: {test_obs_array.dtype}")
+                print(f"[DEBUG] Obs range: [{test_obs_array.min():.3f}, {test_obs_array.max():.3f}]")
             else:
                 print(f"[DEBUG] Obs shape: {test_obs.shape}, dtype: {test_obs.dtype}")
+                print(f"[DEBUG] Obs range: [{test_obs.min():.3f}, {test_obs.max():.3f}]")
 
             test_obs2, test_reward, test_term, test_trunc, test_info2 = env.step(env.action_space.sample())
             print(f"[DEBUG] Step successful!")
@@ -232,21 +130,36 @@ class DQN_Model:
         # Configure policy kwargs based on observation type
         policy_kwargs = {}
 
-        # Check if this is a single-channel (grayscale) image
-        is_single_channel = (obs_space.shape[2] == 1 and obs_space.dtype == np.float32)
+        # Detect observation characteristics
+        obs_channels = obs_space.shape[2] if len(obs_space.shape) == 3 else obs_space.shape[0]
+        is_normalized = (obs_space.dtype == np.float32)
+        is_single_channel = (obs_channels == 1)
+        is_stacked = (obs_channels == 4)  # Typical frame stacking
 
-        if is_single_channel:
-            print(f"[INFO] Detected single-channel normalized observations")
+        print(f"[INFO] Observation characteristics:")
+        print(f"  Channels: {obs_channels}")
+        print(f"  Normalized: {is_normalized}")
+        print(f"  Single channel: {is_single_channel}")
+        print(f"  Frame stacked: {is_stacked}")
+
+        if is_single_channel and is_normalized:
+            # Single grayscale channel
             print(f"[INFO] Using custom SingleChannelCNN features extractor")
-
-            # Use custom CNN for single-channel images
             policy_kwargs['features_extractor_class'] = SingleChannelCNN
             policy_kwargs['features_extractor_kwargs'] = dict(features_dim=512)
-        elif obs_space.dtype == np.float32:
-            # Multi-channel normalized images
-            print(f"[INFO] Detected multi-channel normalized observations (float32)")
-            print(f"[INFO] Setting normalized_image=True for standard NatureCNN")
+        elif is_stacked and is_normalized:
+            # Frame stacked observations (e.g., 4 grayscale frames)
+            print(f"[INFO] Using custom SingleChannelCNN for stacked frames ({obs_channels} channels)")
+            # The SingleChannelCNN should handle multiple channels
+            policy_kwargs['features_extractor_class'] = SingleChannelCNN
+            policy_kwargs['features_extractor_kwargs'] = dict(features_dim=512)
+        elif is_normalized:
+            # Multi-channel normalized images (standard RGB)
+            print(f"[INFO] Using standard NatureCNN with normalized_image=True")
             policy_kwargs['features_extractor_kwargs'] = dict(normalized_image=True)
+        else:
+            # Default: uint8 RGB images
+            print(f"[INFO] Using standard NatureCNN (default settings)")
 
         # Standard DQN for all variants
         model = DQN(
@@ -302,15 +215,15 @@ class DQN_Model:
 
             if self.model_path:
                 model.save(self.model_path)
-                print(f"\n✓ Training complete! Model saved to: {self.model_path}.zip")
+                print(f"\nTraining complete! Model saved to: {self.model_path}.zip")
         except KeyboardInterrupt:
-            print("\n⚠ Training interrupted!")
+            print("\nTraining interrupted!")
             if self.model_path:
                 interrupted_path = self.model_path + "_interrupted"
                 model.save(interrupted_path)
-                print(f"✓ Interrupted model saved to: {interrupted_path}.zip")
+                print(f"Interrupted model saved to: {interrupted_path}.zip")
         except Exception as e:
-            print(f"\n❌ Training failed with error: {e}")
+            print(f"\nTraining failed with error: {e}")
             import traceback
             traceback.print_exc()
             raise
@@ -320,32 +233,33 @@ class DQN_Model:
     def baseline_dqn(self):
         """
         Baseline DQN with standard 64x64x3 RGB observations.
-        Iteration 1 - No improvements
+        No improvements.
         """
         return self.train_model(make_crafter_env)
 
     def reward_shaped_dqn(self):
         """
-        DQN with reward shaping.
-        Iteration 2 - Improvement 1: Reward Shaping
+        DQN with reward shaping only.
+        Improvement 1: Belief-based Reward Shaping
         """
         return self.train_model(make_shaped_crafter_env)
 
     def preprocessed_shaped_dqn(self):
         """
         DQN with reward shaping AND image preprocessing.
-        Iteration 3 - Improvement 2: Grayscale + Normalize
-
-        This combines both improvements:
-        - Improvement 1: Reward shaping
-        - Improvement 2: Image preprocessing (64x64x3 → 64x64x1, normalized to [0,1])
-
-        Benefits:
-        - 3x memory reduction
-        - Faster training
-        - Better gradient flow
+        Improvement 1: Reward shaping
+        Improvement 2: Grayscale + Normalize (64x64x3 → 64x64x1)
         """
         return self.train_model(make_preprocessed_shaped_crafter_env)
+
+    def framestack_dqn(self):
+        """
+        DQN with all improvements: reward shaping, preprocessing, and frame stacking.
+        Improvement 1: Reward shaping
+        Improvement 2: Grayscale + Normalize (64x64x3 → 64x64x1)
+        Improvement 3: Frame stacking (64x64x1 → 64x64x4) for temporal context
+        """
+        return self.train_model(make_framestack_crafter_env)
 
 
 # -------------------------------
@@ -354,7 +268,7 @@ class DQN_Model:
 def main():
     parser = argparse.ArgumentParser(description="Train DQN models for Crafter environment")
     parser.add_argument('--model_type', type=str,
-                        choices=['baseline', 'reward_shaped', 'preprocessed_shaped'],
+                        choices=['baseline', 'reward_shaped', 'preprocessed_shaped', 'framestack'],
                         required=True, help='Type of model to train')
     parser.add_argument('--log_path', type=str, default='./Training/Logs/DQN/',
                         help='Base directory for logs')
@@ -421,12 +335,14 @@ def main():
         model, env = dqn_model.reward_shaped_dqn()
     elif args.model_type == 'preprocessed_shaped':
         model, env = dqn_model.preprocessed_shaped_dqn()
+    elif args.model_type == 'framestack':
+        model, env = dqn_model.framestack_dqn()
 
     env.close()
     print(f"\n{'=' * 70}")
-    print(f"✓ Training complete!")
-    print(f"✓ Model saved to: {args.model_path}.zip")
-    print(f"✓ Logs saved to: {log_path}")
+    print(f"Training complete!")
+    print(f"Model saved to: {args.model_path}.zip")
+    print(f"Logs saved to: {log_path}")
     print(f"{'=' * 70}\n")
 
 

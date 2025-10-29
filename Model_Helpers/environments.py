@@ -4,6 +4,7 @@ import crafter
 from gym.envs.registration import register
 from shimmy import GymV21CompatibilityV0
 from .image_preprocessing import GrayscaleNormalizeWrapper
+from .frame_stacking import FrameStackWrapper
 
 try:
     from .belief_reward_shaping import BeliefRewardWrapper
@@ -19,21 +20,11 @@ register(
 def make_env(log_dir='./Training/Logs/jsons/',
              save_video=False,
              save_episode=False):
-    """
-    Create standard Crafter environment without reward shaping.
-    Args:
-        log_dir: Directory to save logs
-        save_video: Whether to save videos
-        save_episode: Whether to save episode data
-    Returns:
-        Wrapped Crafter environment compatible with Gymnasium/SB3
-    """
+    """ Create standard Crafter environment without reward shaping."""
     os.makedirs(log_dir, exist_ok=True)
 
-    # Create base environment
     env = gym.make("CrafterPartial-v1")
 
-    # Apply Recorder wrapper
     env = crafter.Recorder(
         env,
         log_dir,
@@ -43,7 +34,6 @@ def make_env(log_dir='./Training/Logs/jsons/',
     )
 
     env = GymV21CompatibilityV0(env=env)
-
     return env
 
 
@@ -54,19 +44,7 @@ def make_shaped_env(log_dir='./Training/Logs/jsons_shaped/',
                     use_clusters=True,
                     save_video=False,
                     save_episode=False):
-    """
-    Create Crafter environment WITH reward shaping (for training improved model).
-    Args:
-        log_dir: Directory to save logs
-        lambda_param: Lambda parameter for belief reward scaling
-        health_weight: Weight for health-based reward shaping
-        clip_belief_reward: Whether to clip belief rewards
-        use_clusters: Whether to use achievement clusters
-        save_video: Whether to save videos
-        save_episode: Whether to save episode data
-    Returns:
-        Wrapped Crafter environment with reward shaping, compatible with Gymnasium/SB3
-    """
+    """ Create Crafter environment WITH reward shaping (Improvement 1)."""
     os.makedirs(log_dir, exist_ok=True)
 
     env = gym.make("CrafterPartial-v1")
@@ -96,9 +74,7 @@ def make_shaped_env(log_dir='./Training/Logs/jsons_shaped/',
 
 def make_preprocessed_shaped_env(log_dir='./Training/Logs/jsons_processed/', save_video=False,
                     save_episode=False):
-    """
-    Used for: DQN + Reward Shaping + Preprocessing (Iteration 3)
-    """
+    """Used for: DQN + Reward Shaping + Preprocessing (Improvement 2)"""
     os.makedirs(log_dir, exist_ok=True)
     env = gym.make("CrafterPartial-v1")
 
@@ -114,5 +90,41 @@ def make_preprocessed_shaped_env(log_dir='./Training/Logs/jsons_processed/', sav
 
     # Improvement 2: Preprocessing
     env = GrayscaleNormalizeWrapper(env)
+
+    return env
+
+
+def make_framestack_env(log_dir='./Training/Logs/jsons_framestack/',
+                        num_stack=4,
+                        lazy=True,
+                        save_video=False,
+                        save_episode=False):
+    """
+    Improvement 1 + 2 + 3: Reward Shaping + Preprocessing + Frame Stacking.
+    Temporal: Yes (4 frames of history)
+    """
+    os.makedirs(log_dir, exist_ok=True)
+
+    env = gym.make("CrafterPartial-v1")
+
+    env = crafter.Recorder(
+        env,
+        log_dir,
+        save_stats=True,
+        save_video=save_video,
+        save_episode=save_episode
+    )
+
+    env = GymV21CompatibilityV0(env=env)
+
+    # Improvement 1: Reward Shaping
+    if BeliefRewardWrapper is not None:
+        env = BeliefRewardWrapper(env)
+
+    # Improvement 2: Image Preprocessing
+    env = GrayscaleNormalizeWrapper(env)
+
+    # Improvement 3: Frame Stacking
+    env = FrameStackWrapper(env, num_stack=num_stack, stack_axis=-1, lazy=lazy)
 
     return env
