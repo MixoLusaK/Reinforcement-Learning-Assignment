@@ -50,7 +50,10 @@ Crafter_Project/
 ├── Model_Helpers/                 # Environment wrappers and preprocessing
 │   ├── __init__.py
 │   ├── environments.py
-│   ├── belief_reward_shaping.py 
+│   ├── belief_reward_shaping.py
+│   ├── frame_stacking.py
+│   ├──call_backs.py
+│   ├──single_cnn_channel.py
 │   └── image_processing.py        # Image normalization, resizing, and filtering
 │
 ├── environment.yml                # Project dependencies
