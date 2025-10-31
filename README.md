@@ -60,6 +60,9 @@ Crafter_Project/
 │   ├── dqn_reward_shaped.zip
 │   ├── dqn_image_processed.zip
 │   ├── dqn_frame_staked.zip
+│   ├── ppo_baseline.zip
+│   ├── ppo_reward_shaped.zip
+│   ├── ppo_icm.zip
 ├── Results/                       #json files for the models testing
 ├── environment.yml                # Project dependencies
 └── README.md
