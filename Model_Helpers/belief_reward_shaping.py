@@ -6,14 +6,7 @@ from collections import defaultdict
 
 class BeliefRewardWrapper(gym.Wrapper):
     """
-    Belief Reward Shaping (BRS) for Crafter environment.
-
-    Implements Bayesian reward shaping from Marom & Rosman (2018)
-    to accelerate learning by providing shaped rewards based on prior
-    beliefs about achievement values that decay with experience.
-
-    SB3-compatible: returns legacy 4-tuple (obs, reward, done, info)
-    for step() to work with Stable-Baselines3 DQN.
+    A Bayesian  belief systems update to maintain beliefs about achievement difficulty for reward shaping
     """
 
     def __init__(self, env, lambda_param=1000, health_weight=0.1,
@@ -47,6 +40,7 @@ class BeliefRewardWrapper(gym.Wrapper):
             self.metadata = {'render_modes': ['rgb_array', 'human'], 'render_fps': 30}
 
     def _initialize_priors(self):
+        """Defines starting beliefs about achievement difficulty"""
         priors = {}
         # Tier 1
         priors['collect_drink'] = 1.0
@@ -80,6 +74,7 @@ class BeliefRewardWrapper(gym.Wrapper):
         return priors
 
     def _define_belief_clusters(self):
+        """ Groups achievements into categories so the agent can learn about related tasks together"""
         clusters = {
             'survival_cluster': ['collect_drink', 'eat_cow', 'eat_plant', 'wake_up'],
             'basic_resources_cluster': ['collect_wood', 'collect_sapling', 'place_plant'],
@@ -94,11 +89,9 @@ class BeliefRewardWrapper(gym.Wrapper):
 
     def reset(self, **kwargs):
         """
-        Reset wrapper - expects Gymnasium format from wrapped env.
-        Returns (obs, info) tuple for modern SB3/Gymnasium compatibility.
+         Resets episode-specific tracking while preserving learned beliefs
         """
         result = self.env.reset(**kwargs)
-        # The wrapped env (GymV21CompatibilityV0) returns (obs, info)
         if isinstance(result, tuple) and len(result) == 2:
             obs, info = result
         else:
@@ -111,10 +104,11 @@ class BeliefRewardWrapper(gym.Wrapper):
         self.episode_shaped_reward = 0.0
         self.episode_belief_reward = 0.0
 
-        # Return (obs, info) tuple for Gymnasium/modern SB3 compatibility
+
         return obs, info
 
     def _compute_belief_reward(self, achievement, env_reward):
+        """ Updates belief about an achievement's reward using Bayesian inference"""
         n = self.achievement_counts[achievement]
         prior = self.prior_means.get(achievement, 0.0)
         if n == 0:
@@ -128,6 +122,7 @@ class BeliefRewardWrapper(gym.Wrapper):
         return belief
 
     def _compute_cluster_belief_reward(self, achievement, env_reward):
+        """Updates belief for the entire cluster of related achievements"""
         cluster_name = None
         for cluster, achievements in self.belief_clusters.items():
             if achievement in achievements:
@@ -150,12 +145,10 @@ class BeliefRewardWrapper(gym.Wrapper):
 
     def step(self, action):
         """
-        Gymnasium-compatible step() that returns 5-tuple.
-        Returns: (obs, shaped_reward, terminated, truncated, info)
+        Intercepts environment step, computes belief rewards, returns modified reward
         """
         result = self.env.step(action)
 
-        # Unpack robustly for Gymnasium 5-tuple
         if len(result) == 5:
             obs, env_reward, terminated, truncated, info = result
         elif len(result) == 4:
@@ -168,12 +161,10 @@ class BeliefRewardWrapper(gym.Wrapper):
         info['original_reward'] = env_reward
         self.episode_original_reward += env_reward
 
-        # Health shaping
         health = info.get("health", self.prev_health)
         health_delta = health - self.prev_health
         health_reward = self.health_weight * health_delta
 
-        # Belief rewards
         achievements = info.get("achievements", {})
         belief_total = 0.0
         new_achievements = 0
@@ -195,7 +186,6 @@ class BeliefRewardWrapper(gym.Wrapper):
         if self.clip_belief_reward:
             belief_total = np.clip(belief_total, -5.0, 5.0)
 
-        # Total shaped reward
         shaped_reward = (env_reward - new_achievements + belief_total + health_reward)
 
         info['belief_reward'] = belief_total

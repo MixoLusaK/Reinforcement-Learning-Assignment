@@ -1,24 +1,32 @@
 # Dependencies
 import argparse
 from stable_baselines3 import DQN
+from stable_baselines3.common.evaluation import evaluate_policy
 from stable_baselines3.common.vec_env import DummyVecEnv
 import os
 import sys
 import numpy as np
-import imageio
 import json
 from collections import defaultdict
-import matplotlib.pyplot as plt
-import seaborn as sns
 from datetime import datetime
 import gymnasium as gym
 from shimmy import GymV21CompatibilityV0
 import gym as old_gym
+from gym.envs.registration import register
+import warnings
+
+warnings.filterwarnings('ignore', message='.*Gym has been unmaintained.*')
+
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 try:
     import fix_numpy_compat
 except ImportError:
     pass
+
+register(
+    id='CrafterPartial-v1',
+    entry_point='crafter:Env',
+)
 
 try:
     import crafter
@@ -52,29 +60,83 @@ class GrayscaleNormalizeWrapper(gym.ObservationWrapper):
         return np.expand_dims(normalized, axis=-1)
 
 
+class FrameStackWrapper(gym.Wrapper):
+    """
+    Stack frames for temporal information.
+    Must match the frame stacking used during training.
+    """
+
+    def __init__(self, env, num_stack=4):
+        super().__init__(env)
+        self.num_stack = num_stack
+        self.frames = None
+
+        obs_shape = env.observation_space.shape
+        new_shape = (obs_shape[0], obs_shape[1], obs_shape[2] * num_stack)
+
+        self.observation_space = gym.spaces.Box(
+            low=0.0,
+            high=1.0,
+            shape=new_shape,
+            dtype=np.float32
+        )
+
+    def reset(self, **kwargs):
+        result = self.env.reset(**kwargs)
+        if isinstance(result, tuple):
+            obs, info = result
+        else:
+            obs = result
+            info = {}
+
+        # Initialize frame stack with the first observation
+        self.frames = [obs for _ in range(self.num_stack)]
+        return self._get_stacked_obs(), info
+
+    def step(self, action):
+        result = self.env.step(action)
+
+        if len(result) == 5:
+            obs, reward, terminated, truncated, info = result
+            done = terminated or truncated
+        else:
+            obs, reward, done, info = result
+            terminated = done
+            truncated = False
+
+        # Update frame stack
+        self.frames.pop(0)
+        self.frames.append(obs)
+
+        if len(result) == 5:
+            return self._get_stacked_obs(), reward, terminated, truncated, info
+        else:
+            return self._get_stacked_obs(), reward, done, info
+
+    def _get_stacked_obs(self):
+        """Stack frames along the channel dimension"""
+        return np.concatenate(self.frames, axis=-1)
+
+
 class DQN_Testing:
     """
-    Class to test DQN models on Crafter environment.
-
-    CRITICAL: Tests are conducted on the STANDARD environment (without reward shaping)
-    to comply with restriction 5c: "for all evaluation you do, please include
-    performance on the standard rewards and achievement unlock rates."
+    Class to test DQN models on Crafter environment using evaluate_policy.
     """
 
     def __init__(self, model_path, num_episodes=100, video_dir="./crafter_videos/",
-                 results_dir="./results/", plots_dir="./plots/",
-                 use_preprocessing=False):
+                 results_dir="./results/", use_preprocessing=False,
+                 use_frame_stacking=False, num_stack=4):
         self.model_path = model_path
         self.num_episodes = num_episodes
         self.video_dir = video_dir
         self.results_dir = results_dir
-        self.plots_dir = plots_dir
         self.use_preprocessing = use_preprocessing
+        self.use_frame_stacking = use_frame_stacking
+        self.num_stack = num_stack
 
         # Create directories
         os.makedirs(self.video_dir, exist_ok=True)
         os.makedirs(self.results_dir, exist_ok=True)
-        os.makedirs(self.plots_dir, exist_ok=True)
 
         # All possible achievements in Crafter
         self.all_achievements = [
@@ -86,55 +148,122 @@ class DQN_Testing:
             "eat_cow", "eat_plant", "wake_up"
         ]
 
-    def _make_test_env(self, episode_num=None, record_video=False):
+    def _make_test_env(self, record_stats=True, record_video=False):
         """
         Create a testing environment compatible with the training setup.
-
-        Args:
-            episode_num: Episode number for naming video files
-            record_video: Whether to record video for this episode
-
-        Returns:
-            Wrapped Crafter environment
         """
         # Create base Crafter environment (standard rewards, no reward shaping)
-        env = crafter.Env()
+        env = old_gym.make("CrafterPartial-v1")
 
-        # Use Crafter's built-in Recorder for video and stats
-        if record_video and episode_num is not None:
-            video_dir = os.path.join(self.video_dir, f"episode_{episode_num}")
+        # CRITICAL: Ensure all wrappers have proper metadata
+        # The Recorder needs metadata.render_modes to be available at every level
+        def ensure_metadata(env_obj):
+            """Helper to ensure metadata exists on environment"""
+            if not hasattr(env_obj, "metadata") or env_obj.metadata is None:
+                env_obj.metadata = {"render_modes": ["rgb_array"], "render_fps": 30}
+            elif "render_modes" not in env_obj.metadata:
+                env_obj.metadata["render_modes"] = ["rgb_array"]
+            if "render_fps" not in env_obj.metadata:
+                env_obj.metadata["render_fps"] = 30
+
+        ensure_metadata(env)
+
+        # Ensure all nested environments have metadata
+        current = env
+        while hasattr(current, 'env'):
+            current = current.env
+            ensure_metadata(current)
+
+        # Use Crafter's built-in Recorder for stats tracking
+        if record_stats:
             env = crafter.Recorder(
                 env,
-                video_dir,
+                self.video_dir,
                 save_stats=True,
-                save_video=True,
-                save_episode=True
-            )
-        else:
-            # Just record stats without video
-            env = crafter.Recorder(
-                env,
-                self.results_dir,
-                save_stats=True,
-                save_video=False,
+                save_video=record_video,
                 save_episode=False
             )
+            ensure_metadata(env)
 
-        # Apply GymV21 compatibility wrapper (matches training setup)
+        # Apply GymV21 compatibility wrapper
         env = GymV21CompatibilityV0(env=env)
+        ensure_metadata(env)
 
-        # Apply preprocessing if required (matches training setup)
+        # Apply preprocessing if required
         if self.use_preprocessing:
             env = GrayscaleNormalizeWrapper(env)
+            ensure_metadata(env)
+
+        # Apply frame stacking if required
+        if self.use_frame_stacking:
+            env = FrameStackWrapper(env, num_stack=self.num_stack)
+            ensure_metadata(env)
 
         return env
 
-    def test_dqn_model(self, model_type='baseline'):
+    def test_with_evaluate_policy(self, model_type='baseline'):
         """
-        Comprehensive evaluation of DQN model.
+        Test using Stable Baselines3's evaluate_policy function.
+        This is simpler but provides less detailed metrics.
+        """
+        print(f"Loading model from: {self.model_path}")
+        model = DQN.load(self.model_path)
 
-        Args:
-            model_type: 'baseline', 'reward_shaped', or 'preprocessed_shaped'
+        model_name_display = {
+            'baseline': 'DQN Baseline',
+            'reward_shaped': 'DQN Reward Shaped',
+            'preprocessed_shaped': 'DQN Preprocessed + Reward Shaped',
+            'frame_stacking': 'DQN Frame Stacking + Preprocessed + Reward Shaped'
+        }.get(model_type, f'DQN {model_type.title()}')
+
+        print(f"\nTesting {model_name_display} Model using evaluate_policy...")
+        print("=" * 70)
+
+        # Create evaluation environment
+        eval_env = self._make_test_env(record_stats=True)
+
+        # Use evaluate_policy for quick evaluation
+        mean_reward, std_reward = evaluate_policy(
+            model,
+            eval_env,
+            n_eval_episodes=self.num_episodes,
+            deterministic=True,
+            return_episode_rewards=False
+        )
+
+        print(f"\nEvaluation Results:")
+        print(f"  Mean Reward: {mean_reward:.2f} ± {std_reward:.2f}")
+        print(f"  Episodes: {self.num_episodes}")
+
+        # Save basic results
+        results = {
+            "model": model_name_display,
+            "num_episodes": self.num_episodes,
+            "timestamp": datetime.now().isoformat(),
+            "evaluation_method": "evaluate_policy",
+            "preprocessing": self.use_preprocessing,
+            "frame_stacking": self.use_frame_stacking,
+            "num_stack": self.num_stack if self.use_frame_stacking else None,
+            "metrics": {
+                "mean_reward": float(mean_reward),
+                "std_reward": float(std_reward),
+            }
+        }
+
+        results_path = os.path.join(self.results_dir, f"dqn_{model_type}_evaluate_policy_results.json")
+        with open(results_path, 'w') as f:
+            json.dump(results, f, indent=2)
+
+        print(f"Results saved to: {results_path}")
+        print("=" * 70)
+
+        eval_env.close()
+        return results
+
+    def test_with_detailed_tracking(self, model_type='baseline'):
+        """
+        Test with detailed achievement and action tracking.
+        This is your original implementation with more metrics.
         """
         print(f"Loading model from: {self.model_path}")
         model = DQN.load(self.model_path)
@@ -149,53 +278,56 @@ class DQN_Testing:
         model_name_display = {
             'baseline': 'DQN Baseline',
             'reward_shaped': 'DQN Reward Shaped',
-            'preprocessed_shaped': 'DQN Preprocessed + Reward Shaped'
+            'preprocessed_shaped': 'DQN Preprocessed + Reward Shaped',
+            'frame_stacking': 'DQN Frame Stacking + Preprocessed + Reward Shaped'
         }.get(model_type, f'DQN {model_type.title()}')
 
-        print(f"\nTesting {model_name_display} Model over {self.num_episodes} episodes...")
+        print(f"\nTesting {model_name_display} Model with detailed tracking...")
         print("=" * 70)
-        print("EVALUATION ON STANDARD REWARDS")
-        if self.use_preprocessing:
-            print("Using preprocessing: Grayscale + Normalization")
-        if model_type in ['reward_shaped', 'preprocessed_shaped']:
-            print("Model was trained WITH improvements, but evaluated WITHOUT reward shaping.")
-        print("=" * 70)
-
-        first_high_achievement_recorded = False
 
         for episode in range(self.num_episodes):
-            # Determine if we should record video for this episode
-            record_video = not first_high_achievement_recorded
+            # Record video for first 10 episodes
+            record_video = episode < 10
 
-            env = self._make_test_env(episode_num=episode + 1, record_video=record_video)
+            # Create new environment with video recording enabled if needed
+            env = self._make_test_env(record_stats=True, record_video=record_video)
 
-            obs, info = env.reset()
+            if record_video:
+                print(f"Recording video for episode {episode + 1}")
+
+            obs = env.reset()
+            if isinstance(obs, tuple):
+                obs, info = obs
+            else:
+                info = {}
+
             done = False
-
             episode_reward = 0
             step = 0
             episode_achievements = set()
 
             while not done:
-                # Predict action
                 action, _ = model.predict(obs, deterministic=True)
                 action_counts[int(action)] += 1
 
-                # Step environment
-                obs, reward, terminated, truncated, info = env.step(action)
-                done = terminated or truncated
+                step_result = env.step(action)
+
+                if len(step_result) == 5:
+                    obs, reward, terminated, truncated, info = step_result
+                    done = terminated or truncated
+                else:
+                    obs, reward, done, info = step_result
 
                 episode_reward += reward
                 step += 1
 
-                # Track achievements (info might have 'semantic' with achievements)
+                # Track achievements
                 if 'achievements' in info:
                     for achievement, unlocked in info['achievements'].items():
                         if unlocked and achievement not in episode_achievements:
                             achievement_unlocks[achievement] += 1
                             episode_achievements.add(achievement)
                 elif 'semantic' in info and isinstance(info['semantic'], dict):
-                    # Some Crafter versions use 'semantic' key
                     for achievement, unlocked in info['semantic'].items():
                         if unlocked and achievement not in episode_achievements:
                             achievement_unlocks[achievement] += 1
@@ -205,21 +337,10 @@ class DQN_Testing:
             episode_lengths.append(step)
             achievement_per_episode.append(len(episode_achievements))
 
-            # Mark that we recorded a high achievement episode
-            num_achievements = len(episode_achievements)
-            if not first_high_achievement_recorded and num_achievements >= 11 and record_video:
-                print(f"\n{'=' * 70}")
-                print(f"🎉 HIGH ACHIEVEMENT EPISODE DETECTED! ({num_achievements} achievements)")
-                print(f"Video saved to: {os.path.join(self.video_dir, f'episode_{episode + 1}')}")
-                print(f"{'=' * 70}\n")
-                first_high_achievement_recorded = True
-
-            status_marker = ' ⭐ RECORDED!' if (not first_high_achievement_recorded and num_achievements >= 11 and record_video) else ''
             print(f"Episode {episode + 1:3d}/{self.num_episodes}: "
                   f"Reward={episode_reward:6.2f}, "
                   f"Steps={step:4d}, "
-                  f"Achievements={len(episode_achievements):2d}"
-                  f"{status_marker}")
+                  f"Achievements={len(episode_achievements):2d}")
 
             env.close()
 
@@ -245,13 +366,13 @@ class DQN_Testing:
         print("\n" + "=" * 70)
         print(f"EVALUATION SUMMARY - {model_name_display.upper()}")
         print("=" * 70)
-        print(f"\nPerformance Metrics (STANDARD REWARDS):")
+        print(f"\nPerformance Metrics:")
         print(f"  Average Cumulative Reward:     {avg_reward:8.2f} ± {std_reward:.2f}")
         print(f"  Average Survival Time:         {avg_survival_time:8.2f} ± {std_survival_time:.2f} steps")
         print(f"  Average Achievements/Episode:  {avg_achievements:8.2f}")
         print(f"  Geometric Mean of Achievements: {geometric_mean:7.4f}")
 
-        print(f"\nAchievement Unlock Rates (All {len(self.all_achievements)} Achievements):")
+        print(f"\nAchievement Unlock Rates:")
         sorted_achievements = sorted(achievement_rates.items(), key=lambda x: x[1], reverse=True)
         for achievement, rate in sorted_achievements:
             count = achievement_unlocks.get(achievement, 0)
@@ -259,20 +380,15 @@ class DQN_Testing:
             bar = bar.ljust(50)
             print(f"  {achievement:30s}: {rate * 100:5.1f}% [{bar}] ({count:3d}/{self.num_episodes})")
 
-        # Create visualizations
-        print("\nGenerating visualizations...")
-        self.create_visualizations(
-            episode_rewards, episode_lengths, achievement_per_episode,
-            achievement_rates, action_counts, model_name=model_type
-        )
-
         # Save results
         results = {
             "model": model_name_display,
             "num_episodes": self.num_episodes,
             "timestamp": datetime.now().isoformat(),
-            "evaluation_type": "STANDARD_REWARDS",
+            "evaluation_method": "detailed_tracking",
             "preprocessing": self.use_preprocessing,
+            "frame_stacking": self.use_frame_stacking,
+            "num_stack": self.num_stack if self.use_frame_stacking else None,
             "metrics": {
                 "average_reward": float(avg_reward),
                 "std_reward": float(std_reward),
@@ -288,90 +404,15 @@ class DQN_Testing:
             "achievements_per_episode": achievement_per_episode
         }
 
-        results_path = os.path.join(self.results_dir, f"dqn_{model_type}_results.json")
+        results_path = os.path.join(self.results_dir, f"dqn_{model_type}_detailed_results.json")
         with open(results_path, 'w') as f:
             json.dump(results, f, indent=2)
 
-        print(f"✓ Results saved to: {results_path}")
+        print(f"\n Results saved to: {results_path}")
+        print(f" Videos saved to: {self.video_dir}")
         print("=" * 70)
 
         return results
-
-    def create_visualizations(self, episode_rewards, episode_lengths,
-                              achievements_per_episode, achievement_rates,
-                              action_counts, model_name="model"):
-        """Create comprehensive visualization plots"""
-
-        sns.set_style("whitegrid")
-
-        # Episode metrics plot
-        fig, axes = plt.subplots(2, 2, figsize=(15, 10))
-
-        axes[0, 0].plot(episode_rewards, linewidth=1, alpha=0.7, color='blue')
-        axes[0, 0].axhline(np.mean(episode_rewards), color='red', linestyle='--',
-                           label=f'Mean: {np.mean(episode_rewards):.2f}')
-        axes[0, 0].set_xlabel('Episode')
-        axes[0, 0].set_ylabel('Cumulative Reward (Standard)')
-        axes[0, 0].set_title(f'Episode Rewards - {model_name.title()} Model')
-        axes[0, 0].legend()
-        axes[0, 0].grid(True, alpha=0.3)
-
-        axes[0, 1].plot(episode_lengths, linewidth=1, alpha=0.7, color='green')
-        axes[0, 1].axhline(np.mean(episode_lengths), color='red', linestyle='--',
-                           label=f'Mean: {np.mean(episode_lengths):.2f}')
-        axes[0, 1].set_xlabel('Episode')
-        axes[0, 1].set_ylabel('Steps')
-        axes[0, 1].set_title(f'Survival Time - {model_name.title()} Model')
-        axes[0, 1].legend()
-        axes[0, 1].grid(True, alpha=0.3)
-
-        axes[1, 0].plot(achievements_per_episode, linewidth=1, alpha=0.7, color='purple')
-        axes[1, 0].axhline(np.mean(achievements_per_episode), color='red', linestyle='--',
-                           label=f'Mean: {np.mean(achievements_per_episode):.2f}')
-        axes[1, 0].set_xlabel('Episode')
-        axes[1, 0].set_ylabel('Achievements')
-        axes[1, 0].set_title(f'Achievements per Episode - {model_name.title()}')
-        axes[1, 0].legend()
-        axes[1, 0].grid(True, alpha=0.3)
-
-        axes[1, 1].hist(episode_rewards, bins=20, color='blue', alpha=0.7, edgecolor='black')
-        axes[1, 1].axvline(np.mean(episode_rewards), color='red', linestyle='--',
-                           label=f'Mean: {np.mean(episode_rewards):.2f}')
-        axes[1, 1].set_xlabel('Cumulative Reward')
-        axes[1, 1].set_ylabel('Frequency')
-        axes[1, 1].set_title(f'Reward Distribution - {model_name.title()}')
-        axes[1, 1].legend()
-        axes[1, 1].grid(True, alpha=0.3)
-
-        plt.tight_layout()
-        plt.savefig(os.path.join(self.plots_dir, f'episode_metrics_{model_name}.png'),
-                    dpi=300, bbox_inches='tight')
-        print(f"✓ Saved: episode_metrics_{model_name}.png")
-        plt.close()
-
-        # Achievement unlock rates
-        fig, ax = plt.subplots(figsize=(12, max(6, len(achievement_rates) * 0.3)))
-        sorted_achievements = sorted(achievement_rates.items(), key=lambda x: x[1], reverse=True)
-        achievements, rates = zip(*sorted_achievements)
-
-        colors = ['skyblue' if rate > 0 else 'lightgray' for rate in rates]
-        bars = ax.barh(range(len(achievements)), [r * 100 for r in rates],
-                       color=colors, edgecolor='black')
-        ax.set_yticks(range(len(achievements)))
-        ax.set_yticklabels(achievements)
-        ax.set_xlabel('Unlock Rate (%)')
-        ax.set_title(f'Achievement Unlock Rates - {model_name.title()}')
-        ax.grid(axis='x', alpha=0.3)
-
-        for i, (bar, rate) in enumerate(zip(bars, rates)):
-            if rate > 0:
-                ax.text(rate * 100 + 1, i, f'{rate * 100:.1f}%', va='center', fontweight='bold')
-
-        plt.tight_layout()
-        plt.savefig(os.path.join(self.plots_dir, f'achievement_rates_{model_name}.png'),
-                    dpi=300, bbox_inches='tight')
-        print(f"✓ Saved: achievement_rates_{model_name}.png")
-        plt.close()
 
 
 if __name__ == "__main__":
@@ -379,34 +420,52 @@ if __name__ == "__main__":
     parser.add_argument('--model_path', type=str, required=True,
                         help='Path to the trained model')
     parser.add_argument('--model_type', type=str,
-                        choices=['baseline', 'reward_shaped', 'preprocessed_shaped'],
+                        choices=['baseline', 'reward_shaped', 'preprocessed_shaped', 'frame_stacking'],
                         default='baseline', help='Type of model to test')
     parser.add_argument('--num_episodes', type=int, default=200,
                         help='Number of episodes to test')
     parser.add_argument('--use_preprocessing', action='store_true',
-                        help='Use grayscale+normalization preprocessing (required for preprocessed_shaped model)')
+                        help='Use grayscale+normalization preprocessing')
+    parser.add_argument('--use_frame_stacking', action='store_true',
+                        help='Use frame stacking')
+    parser.add_argument('--num_stack', type=int, default=4,
+                        help='Number of frames to stack (default: 4)')
+    parser.add_argument('--evaluation_method', type=str,
+                        choices=['evaluate_policy', 'detailed'],
+                        default='detailed',
+                        help='Evaluation method: evaluate_policy (fast) or detailed (full metrics)')
     parser.add_argument('--video_dir', type=str, default='./crafter_videos/',
                         help='Directory to save videos')
     parser.add_argument('--results_dir', type=str, default='./results/',
                         help='Directory to save results')
-    parser.add_argument('--plots_dir', type=str, default='./plots/',
-                        help='Directory to save plots')
 
     args = parser.parse_args()
 
-    # Auto-detect preprocessing for 'preprocessed_shaped' model
+    # Auto-enable preprocessing for preprocessed_shaped model
     if args.model_type == 'preprocessed_shaped':
         args.use_preprocessing = True
         print(f"Note: Automatically enabled preprocessing for '{args.model_type}' model")
+
+    # Auto-enable preprocessing + frame stacking for frame_stacking model
+    if args.model_type == 'frame_stacking':
+        args.use_preprocessing = True
+        args.use_frame_stacking = True
+        print(
+            f"Note: Automatically enabled preprocessing + frame stacking ({args.num_stack} frames) for '{args.model_type}' model")
 
     tester = DQN_Testing(
         model_path=args.model_path,
         num_episodes=args.num_episodes,
         video_dir=args.video_dir,
         results_dir=args.results_dir,
-        plots_dir=args.plots_dir,
-        use_preprocessing=args.use_preprocessing
+        use_preprocessing=args.use_preprocessing,
+        use_frame_stacking=args.use_frame_stacking,
+        num_stack=args.num_stack
     )
 
-    # Run test
-    results = tester.test_dqn_model(model_type=args.model_type)
+    # Run test based on evaluation method
+    if args.evaluation_method == 'evaluate_policy':
+        results = tester.test_with_evaluate_policy(model_type=args.model_type)
+    else:
+
+        results = tester.test_with_detailed_tracking(model_type=args.model_type)
