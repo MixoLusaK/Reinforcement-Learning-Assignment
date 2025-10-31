@@ -4,25 +4,278 @@ import json
 import argparse
 from datetime import datetime
 from pathlib import Path
+import numpy as np
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import gymnasium as gym
+import gym as old_gym
+from gym.envs.registration import register
+import torch
+import torch.nn as nn
 from stable_baselines3 import PPO
-from stable_baselines3.common.vec_env import DummyVecEnv, VecFrameStack, VecTransposeImage
-from stable_baselines3.common.callbacks import CheckpointCallback, EvalCallback
+from stable_baselines3.common.vec_env import DummyVecEnv, VecTransposeImage
+from stable_baselines3.common.callbacks import CheckpointCallback, EvalCallback, BaseCallback
 from stable_baselines3.common.monitor import Monitor
+from shimmy import GymV21CompatibilityV0
+import warnings
 
-from Model_Helpers.environments import make_env, make_shaped_env
+warnings.filterwarnings('ignore', message='.*Gym has been unmaintained.*')
+
+#register Crafter environment
+register(
+    id='CrafterPartial-v1',
+    entry_point='crafter:Env',
+)
+
+try:
+    import crafter
+except ImportError:
+    print("Error: crafter package not found. Install with: pip install crafter")
+    sys.exit(1)
+
+
+class IntrinsicCuriosityWrapper(gym.Wrapper):
+
+    def __init__(self, env, feature_dim=128, curiosity_weight=0.01, device='auto'):
+        super().__init__(env)
+        self.curiosity_weight = curiosity_weight
+
+        if device == 'auto':
+            try:
+                if torch.cuda.is_available():
+                    test_tensor = torch.zeros(1).cuda()
+                    self.device = 'cuda'
+                else:
+                    self.device = 'cpu'
+            except (AssertionError, RuntimeError):
+                self.device = 'cpu'
+        else:
+            self.device = device
+
+        print(f"ICM using device: {self.device}")
+
+        #observation shape
+        obs_shape = env.observation_space.shape
+
+        self.feature_net = nn.Sequential(
+            nn.Conv2d(obs_shape[2], 32, kernel_size=8, stride=4),
+            nn.ReLU(),
+            nn.Conv2d(32, 64, kernel_size=4, stride=2),
+            nn.ReLU(),
+            nn.Conv2d(64, 64, kernel_size=3, stride=1),
+            nn.ReLU(),
+            nn.Flatten(),
+            nn.Linear(1024, feature_dim)
+        ).to(self.device)
+
+        self.forward_model = nn.Sequential(
+            nn.Linear(feature_dim + env.action_space.n, 256),
+            nn.ReLU(),
+            nn.Linear(256, feature_dim)
+        ).to(self.device)
+
+        self.inverse_model = nn.Sequential(
+            nn.Linear(feature_dim * 2, 256),
+            nn.ReLU(),
+            nn.Linear(256, env.action_space.n)
+        ).to(self.device)
+
+        self.optimizer = torch.optim.Adam(
+            list(self.feature_net.parameters()) +
+            list(self.forward_model.parameters()) +
+            list(self.inverse_model.parameters()),
+            lr=1e-4
+        )
+
+        self.prev_obs = None
+        self.total_intrinsic_reward = 0
+        self.episode_intrinsic_reward = 0
+
+    def _preprocess_obs(self, obs):
+        if obs.dtype == np.uint8:
+            obs = obs.astype(np.float32) / 255.0
+
+        obs_tensor = torch.FloatTensor(obs).to(self.device)
+        obs_tensor = obs_tensor.permute(2, 0, 1).unsqueeze(0)
+        return obs_tensor
+
+    def _compute_intrinsic_reward(self, prev_obs, action, next_obs):
+        with torch.no_grad():
+            prev_obs_tensor = self._preprocess_obs(prev_obs)
+            next_obs_tensor = self._preprocess_obs(next_obs)
+
+            #extract features
+            prev_features = self.feature_net(prev_obs_tensor)
+            next_features = self.feature_net(next_obs_tensor)
+
+            #create action one-hot
+            action_tensor = torch.zeros(1, self.env.action_space.n).to(self.device)
+            action_tensor[0, action] = 1.0
+
+            #forward model prediction
+            pred_next_features = self.forward_model(
+                torch.cat([prev_features, action_tensor], dim=1)
+            )
+
+            #prediction error = intrinsic reward
+            intrinsic_reward = torch.norm(next_features - pred_next_features, dim=1).item()
+
+        #train ICM networks
+        self._train_icm(prev_obs, action, next_obs)
+
+        return intrinsic_reward * self.curiosity_weight
+
+    def _train_icm(self, prev_obs, action, next_obs):
+        prev_obs_tensor = self._preprocess_obs(prev_obs)
+        next_obs_tensor = self._preprocess_obs(next_obs)
+        prev_features = self.feature_net(prev_obs_tensor)
+        next_features = self.feature_net(next_obs_tensor)
+        action_tensor = torch.zeros(1, self.env.action_space.n).to(self.device)
+        action_tensor[0, action] = 1.0
+        pred_next_features = self.forward_model(
+            torch.cat([prev_features, action_tensor], dim=1)
+        )
+        forward_loss = nn.MSELoss()(pred_next_features, next_features.detach())
+
+        #inverse model prediction
+        pred_action_logits = self.inverse_model(
+            torch.cat([prev_features, next_features], dim=1)
+        )
+        action_target = torch.LongTensor([action]).to(self.device)
+        inverse_loss = nn.CrossEntropyLoss()(pred_action_logits, action_target)
+
+        #total loss
+        loss = forward_loss + inverse_loss
+
+        #update networks
+        self.optimizer.zero_grad()
+        loss.backward()
+        self.optimizer.step()
+
+    def reset(self, **kwargs):
+        obs, info = self.env.reset(**kwargs)
+        self.prev_obs = obs
+        self.episode_intrinsic_reward = 0
+        return obs, info
+
+    def step(self, action):
+        obs, reward, terminated, truncated, info = self.env.step(action)
+
+        #compute intrinsic reward
+        if self.prev_obs is not None:
+            intrinsic_reward = self._compute_intrinsic_reward(
+                self.prev_obs, action, obs
+            )
+            self.episode_intrinsic_reward += intrinsic_reward
+            self.total_intrinsic_reward += intrinsic_reward
+
+            #add intrinsic reward to extrinsic reward
+            reward = reward + intrinsic_reward
+            info['intrinsic_reward'] = intrinsic_reward
+            info['episode_intrinsic_reward'] = self.episode_intrinsic_reward
+
+        self.prev_obs = obs
+        return obs, reward, terminated, truncated, info
+
+
+class BeliefRewardWrapper(gym.Wrapper):
+    def __init__(self, env, health_weight=0.1, exploration_weight=0.01):
+        super().__init__(env)
+        self.health_weight = health_weight
+        self.exploration_weight = exploration_weight
+        self.prev_health = None
+        self.prev_hunger = None
+        self.visited_positions = set()
+
+    def reset(self, **kwargs):
+        result = self.env.reset(**kwargs)
+        if isinstance(result, tuple) and len(result) == 2:
+            obs, info = result
+        else:
+            obs = result
+            info = {}
+
+        self.prev_health = info.get('health', 9)
+        self.prev_hunger = info.get('hunger', 9)
+        self.visited_positions.clear()
+
+        #initialize with starting position if available
+        if 'player_pos' in info:
+            start_pos = tuple(info['player_pos'])  # Convert to tuple
+            self.visited_positions.add(start_pos)
+
+        return obs, info
+
+    def step(self, action):
+        result = self.env.step(action)
+        if len(result) == 5:
+            obs, reward, terminated, truncated, info = result
+        elif len(result) == 4:
+            obs, reward, done, info = result
+            terminated = done
+            truncated = False
+        else:
+            raise ValueError(f"Unexpected step result length: {len(result)}")
+
+        current_health = info.get('health', 9)
+        current_hunger = info.get('hunger', 9)
+
+        if self.prev_health is not None:
+            health_reward = (current_health - self.prev_health) * self.health_weight
+            reward += health_reward
+
+        #add exploration reward
+        if 'player_pos' in info:
+            player_pos = info['player_pos']
+
+            if isinstance(player_pos, np.ndarray):
+                player_pos_tuple = tuple(player_pos.tolist())
+            else:
+                player_pos_tuple = tuple(player_pos)
+
+            if player_pos_tuple not in self.visited_positions:
+                self.visited_positions.add(player_pos_tuple)
+                reward += self.exploration_weight
+
+        self.prev_health = current_health
+        self.prev_hunger = current_hunger
+
+        return obs, reward, terminated, truncated, info
+
+class ICMLoggingCallback(BaseCallback):
+    def __init__(self, verbose=0):
+        super().__init__(verbose)
+        self.intrinsic_rewards = []
+
+    def _on_step(self):
+        if len(self.locals.get('infos', [])) > 0:
+            for info in self.locals['infos']:
+                if 'intrinsic_reward' in info:
+                    self.intrinsic_rewards.append(info['intrinsic_reward'])
+
+        if self.n_calls % 1000 == 0 and len(self.intrinsic_rewards) > 0:
+            mean_intrinsic = np.mean(self.intrinsic_rewards[-1000:])
+            self.logger.record('icm/mean_intrinsic_reward', mean_intrinsic)
+
+        return True
+
+
+def _patch_metadata(env):
+    if not hasattr(env, "metadata") or env.metadata is None:
+        env.metadata = {"render_modes": ["human", "rgb_array"], "render_fps": 30}
+    elif "render_modes" not in env.metadata:
+        env.metadata["render_modes"] = ["rgb_array"]
+    if "render_fps" not in env.metadata:
+        env.metadata["render_fps"] = 30
+    return env
 
 
 class PPOTrainer:
-    """
-    PPO training wrapper for Crafter environment.
-    """
-    
-    def __init__(self, 
+    def __init__(self,
                  model_type='baseline',
+                 use_icm=False,
+                 curiosity_weight=0.01,
                  total_timesteps=1_000_000,
                  learning_rate=3e-4,
                  n_steps=2048,
@@ -34,28 +287,11 @@ class PPOTrainer:
                  ent_coef=0.01,
                  vf_coef=0.5,
                  max_grad_norm=0.5,
-                 frame_stack=4,
                  device='auto'):
-        """
-        Initialize PPO trainer.
-        
-        Args:
-            model_type: 'baseline' or 'shaped' (with reward shaping)
-            total_timesteps: Total training timesteps
-            learning_rate: Learning rate
-            n_steps: Number of steps to run per update
-            batch_size: Minibatch size
-            n_epochs: Number of epochs when optimizing surrogate loss
-            gamma: Discount factor
-            gae_lambda: Factor for trade-off of bias vs variance for GAE
-            clip_range: Clipping parameter for PPO
-            ent_coef: Entropy coefficient for exploration
-            vf_coef: Value function coefficient
-            max_grad_norm: Max gradient norm for clipping
-            frame_stack: Number of frames to stack
-            device: Device to run on ('auto', 'cuda', 'cpu')
-        """
+
         self.model_type = model_type
+        self.use_icm = use_icm
+        self.curiosity_weight = curiosity_weight
         self.total_timesteps = total_timesteps
         self.learning_rate = learning_rate
         self.n_steps = n_steps
@@ -67,22 +303,22 @@ class PPOTrainer:
         self.ent_coef = ent_coef
         self.vf_coef = vf_coef
         self.max_grad_norm = max_grad_norm
-        self.frame_stack = frame_stack
         self.device = device
-        
-        # Create timestamped directory for this run
+
         timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-        self.run_dir = Path(f"./Training/Logs/PPO/{model_type}/{timestamp}")
+        model_suffix = "_icm" if use_icm else ""
+        self.run_dir = Path(f"./Training/Logs/PPO/{model_type}{model_suffix}/{timestamp}")
         self.run_dir.mkdir(parents=True, exist_ok=True)
-        
+
         # Save configuration
         self.save_config()
-        
+
     def save_config(self):
-        """Save training configuration to JSON."""
         config = {
             'algorithm': 'PPO',
             'model_type': self.model_type,
+            'use_icm': self.use_icm,
+            'curiosity_weight': self.curiosity_weight if self.use_icm else None,
             'total_timesteps': self.total_timesteps,
             'learning_rate': self.learning_rate,
             'n_steps': self.n_steps,
@@ -94,75 +330,91 @@ class PPOTrainer:
             'ent_coef': self.ent_coef,
             'vf_coef': self.vf_coef,
             'max_grad_norm': self.max_grad_norm,
-            'frame_stack': self.frame_stack,
             'device': self.device,
             'timestamp': datetime.now().isoformat()
         }
-        
+
         config_path = self.run_dir / "config.json"
         with open(config_path, 'w') as f:
             json.dump(config, f, indent=4)
-        print(f"✓ Configuration saved to: {config_path}")
-        
+        print(f"Configuration saved to: {config_path}")
+
     def create_env(self, is_eval=False):
-        """
-        Create wrapped Crafter environment.
-        
-        Args:
-            is_eval: Whether this is an evaluation environment
-            
-        Returns:
-            Wrapped vectorized environment
-        """
-        # Different log directories for train/eval
         if is_eval:
             log_dir = str(self.run_dir / "eval_logs")
         else:
             log_dir = str(self.run_dir / "train_logs")
-        
-        # Create environment based on model type
+
+        os.makedirs(log_dir, exist_ok=True)
+        env = old_gym.make("CrafterPartial-v1")
+
+        def ensure_metadata(env_obj):
+            if not hasattr(env_obj, "metadata") or env_obj.metadata is None:
+                env_obj.metadata = {"render_modes": ["rgb_array"], "render_fps": 30}
+            elif "render_modes" not in env_obj.metadata:
+                env_obj.metadata["render_modes"] = ["rgb_array"]
+            if "render_fps" not in env_obj.metadata:
+                env_obj.metadata["render_fps"] = 30
+
+        ensure_metadata(env)
+        current = env
+        while hasattr(current, 'env'):
+            current = current.env
+            ensure_metadata(current)
+
+        #crafter's Recorder
+        env = crafter.Recorder(
+            env,
+            log_dir,
+            save_stats=True,
+            save_video=is_eval,  # Save videos only for eval
+            save_episode=True
+        )
+        ensure_metadata(env)
+
+        env = GymV21CompatibilityV0(env=env)
+        ensure_metadata(env)
+
         if self.model_type == 'shaped':
-            env = make_shaped_env(
-                log_dir=log_dir,
-                save_video=is_eval,  # Save videos only for eval
-                save_episode=True
-            )
-        else:
-            env = make_env(
-                log_dir=log_dir,
-                save_video=is_eval,
-                save_episode=True
-            )
-        
-        # Wrap in Monitor for statistics
+            print("Adding reward shaping wrapper")
+            env = BeliefRewardWrapper(env)
+            ensure_metadata(env)
+
         env = Monitor(env)
-        
-        # Vectorize environment
+
+        if self.use_icm and not is_eval:
+            print(f"Adding Intrinsic Curiosity Module (weight={self.curiosity_weight})")
+            icm_device = self.device
+            if icm_device == 'auto':
+                try:
+                    if torch.cuda.is_available():
+                        test_tensor = torch.zeros(1).cuda()
+                        icm_device = 'cuda'
+                    else:
+                        icm_device = 'cpu'
+                except (AssertionError, RuntimeError):
+                    # CUDA reported available but doesn't actually work
+                    icm_device = 'cpu'
+
+            env = IntrinsicCuriosityWrapper(
+                env,
+                curiosity_weight=self.curiosity_weight,
+                device=icm_device
+            )
+
+        #vectorize environment
         env = DummyVecEnv([lambda: env])
-        
-        # Stack frames for temporal information
-        if self.frame_stack > 1:
-            env = VecFrameStack(env, n_stack=self.frame_stack)
-        
-        # Transpose images for PyTorch (channels first)
+
+        #transpose images for PyTorch
         env = VecTransposeImage(env)
-        
+
         return env
-    
+
     def create_model(self, train_env):
-        """
-        Create PPO model.
-        
-        Args:
-            train_env: Training environment
-            
-        Returns:
-            PPO model
-        """
-        print(f"\n✓ Creating PPO model on device: {self.device}")
-        
+        print(f"\nCreating PPO model on device: {self.device}")
+
         tensorboard_log = str(self.run_dir / "tensorboard")
-        
+
         model = PPO(
             policy="CnnPolicy",
             env=train_env,
@@ -180,129 +432,82 @@ class PPOTrainer:
             tensorboard_log=tensorboard_log,
             device=self.device
         )
-        
+
         return model
-    
+
     def train_model(self):
-        """
-        Train PPO model with callbacks.
-        
-        Returns:
-            Trained model and training environment
-        """
-        print("\n" + "="*70)
-        print("Training PPO Model")
-        print("="*70)
-        
-        # Create environments
+        print("\n" + "=" * 70)
+        print(f"Training PPO Model {'with ICM' if self.use_icm else ''}")
+        print("=" * 70)
+
         train_env = self.create_env(is_eval=False)
         eval_env = self.create_env(is_eval=True)
-        
+
         print(f"Observation space: {train_env.observation_space}")
         print(f"Action space: {train_env.action_space}")
-        
-        # Create model
+
         model = self.create_model(train_env)
-        
-        # Setup callbacks
+
         callbacks = []
-        
-        # Checkpoint callback - save model periodically
+
+        if self.use_icm:
+            icm_callback = ICMLoggingCallback()
+            callbacks.append(icm_callback)
+
         checkpoint_callback = CheckpointCallback(
-            save_freq=50_000,  # Save every 50k steps
+            save_freq=50_000,
             save_path=str(self.run_dir / "checkpoints"),
             name_prefix="ppo_crafter",
             save_replay_buffer=False,
             save_vecnormalize=True
         )
         callbacks.append(checkpoint_callback)
-        
-        # Evaluation callback - evaluate periodically
+
         eval_callback = EvalCallback(
             eval_env,
             best_model_save_path=str(self.run_dir / "best_model"),
             log_path=str(self.run_dir / "eval_logs"),
-            eval_freq=25_000,  # Evaluate every 25k steps
+            eval_freq=25_000,
             n_eval_episodes=5,
             deterministic=True,
             render=False
         )
         callbacks.append(eval_callback)
-        
-        # Print training info
-        print(f"\n✓ Starting training for {self.total_timesteps:,} timesteps")
-        print(f"✓ Checkpoints will be saved to: {self.run_dir / 'checkpoints'}")
-        print(f"✓ Best model will be saved to: {self.run_dir / 'best_model'}")
-        print(f"\n{'='*70}")
+
+        print(f"\nStarting training for {self.total_timesteps:,} timesteps")
+        if self.use_icm:
+            print(f"ICM Curiosity Weight: {self.curiosity_weight}")
+        print(f"Checkpoints will be saved to: {self.run_dir / 'checkpoints'}")
+        print(f"Best model will be saved to: {self.run_dir / 'best_model'}")
+        print(f"\n{'=' * 70}")
         print(f"To view training in TensorBoard, run:")
         print(f"tensorboard --logdir {self.run_dir / 'tensorboard'}")
-        print(f"{'='*70}\n")
-        
-        # Train the model
+        print(f"{'=' * 70}\n")
+
         model.learn(
             total_timesteps=self.total_timesteps,
             callback=callbacks,
             progress_bar=True
         )
-        
-        # Save final model
+
+        #save final model
         final_model_path = self.run_dir / "final_model"
         model.save(final_model_path)
-        print(f"\n✓ Final model saved to: {final_model_path}")
-        
+        print(f"\nFinal model saved to: {final_model_path}")
+
         return model, train_env
-    
-    def load_and_evaluate(self, model_path, n_eval_episodes=10):
-        """
-        Load a trained model and evaluate it.
-        
-        Args:
-            model_path: Path to saved model
-            n_eval_episodes: Number of episodes to evaluate
-            
-        Returns:
-            List of episode rewards
-        """
-        print(f"\n✓ Loading model from: {model_path}")
-        
-        # Create evaluation environment
-        eval_env = self.create_env(is_eval=True)
-        
-        # Load model
-        model = PPO.load(model_path, env=eval_env, device=self.device)
-        
-        print(f"✓ Evaluating for {n_eval_episodes} episodes...")
-        
-        episode_rewards = []
-        for episode in range(n_eval_episodes):
-            obs = eval_env.reset()
-            done = False
-            episode_reward = 0
-            
-            while not done:
-                action, _states = model.predict(obs, deterministic=True)
-                obs, reward, done, info = eval_env.step(action)
-                episode_reward += reward[0]
-            
-            episode_rewards.append(episode_reward)
-            print(f"Episode {episode + 1}: Reward = {episode_reward:.2f}")
-        
-        mean_reward = sum(episode_rewards) / len(episode_rewards)
-        print(f"\n✓ Mean reward over {n_eval_episodes} episodes: {mean_reward:.2f}")
-        
-        return episode_rewards
 
 
 def main():
-    """Main training script."""
-    parser = argparse.ArgumentParser(description='Train PPO on Crafter')
-    
-    # Model configuration
+    parser = argparse.ArgumentParser(description='Train PPO on Crafter with optional ICM')
     parser.add_argument('--model_type', type=str, default='baseline',
-                        choices=['baseline', 'shaped'],
+                        choices=['baseline', 'shaped', 'shaped_icm'],
                         help='Model type: baseline or shaped (with reward shaping)')
-    
-    # Training parameters
+    parser.add_argument('--use_icm', action='store_true',
+                        help='Use Intrinsic Curiosity Module for exploration')
+    parser.add_argument('--curiosity_weight', type=float, default=0.01,
+                        help='Weight for intrinsic curiosity rewards')
+
     parser.add_argument('--total_timesteps', type=int, default=1_000_000,
                         help='Total training timesteps')
     parser.add_argument('--learning_rate', type=float, default=3e-4,
@@ -325,25 +530,16 @@ def main():
                         help='Value function coefficient')
     parser.add_argument('--max_grad_norm', type=float, default=0.5,
                         help='Max gradient norm')
-    parser.add_argument('--frame_stack', type=int, default=4,
-                        help='Number of frames to stack')
     parser.add_argument('--device', type=str, default='auto',
                         choices=['auto', 'cuda', 'cpu'],
                         help='Device to use for training')
-    
-    # Evaluation
-    parser.add_argument('--eval_only', action='store_true',
-                        help='Only evaluate a trained model')
-    parser.add_argument('--model_path', type=str, default=None,
-                        help='Path to model for evaluation')
-    parser.add_argument('--n_eval_episodes', type=int, default=10,
-                        help='Number of evaluation episodes')
-    
+
     args = parser.parse_args()
-    
-    # Create trainer
+
     ppo_trainer = PPOTrainer(
         model_type=args.model_type,
+        use_icm=args.use_icm,
+        curiosity_weight=args.curiosity_weight,
         total_timesteps=args.total_timesteps,
         learning_rate=args.learning_rate,
         n_steps=args.n_steps,
@@ -355,16 +551,10 @@ def main():
         ent_coef=args.ent_coef,
         vf_coef=args.vf_coef,
         max_grad_norm=args.max_grad_norm,
-        frame_stack=args.frame_stack,
         device=args.device
     )
-    
-    if args.eval_only:
-        if args.model_path is None:
-            raise ValueError("--model_path must be provided for evaluation")
-        ppo_trainer.load_and_evaluate(args.model_path, args.n_eval_episodes)
-    else:
-        model, env = ppo_trainer.train_model()
+
+    model, env = ppo_trainer.train_model()
 
 
 if __name__ == "__main__":
