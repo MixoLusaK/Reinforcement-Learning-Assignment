@@ -75,7 +75,7 @@ class DQN_Model:
         }
         with open(config_path, 'w') as f:
             json.dump(config_data, f, indent=4)
-        print(f"✓ Configuration saved to: {config_path}")
+        print(f"Configuration saved to: {config_path}")
 
     def _estimate_buffer_memory(self, obs_shape, buffer_size):
         """Estimate replay buffer memory usage"""
@@ -86,7 +86,7 @@ class DQN_Model:
 
     def create_model(self, env, model_name: str = "dqn"):
         device = "cuda" if torch.cuda.is_available() else "cpu"
-        print(f"\n✓ Creating {model_name} model on device: {device}")
+        print(f"\nCreating {model_name} model on device: {device}")
         obs_space = env.observation_space
         print(f"Observation space: {obs_space}")
         print(f"Action space: {env.action_space}")
@@ -338,4 +338,5 @@ def main():
 
 
 if __name__ == "__main__":
+
     main()
