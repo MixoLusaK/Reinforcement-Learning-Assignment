@@ -254,7 +254,7 @@ class DQN_Testing:
         with open(results_path, 'w') as f:
             json.dump(results, f, indent=2)
 
-        print(f"✓ Results saved to: {results_path}")
+        print(f"Results saved to: {results_path}")
         print("=" * 70)
 
         eval_env.close()
@@ -293,7 +293,7 @@ class DQN_Testing:
             env = self._make_test_env(record_stats=True, record_video=record_video)
 
             if record_video:
-                print(f"🎥 Recording video for episode {episode + 1}")
+                print(f"Recording video for episode {episode + 1}")
 
             obs = env.reset()
             if isinstance(obs, tuple):
@@ -408,8 +408,8 @@ class DQN_Testing:
         with open(results_path, 'w') as f:
             json.dump(results, f, indent=2)
 
-        print(f"\n✓ Results saved to: {results_path}")
-        print(f"✓ Videos saved to: {self.video_dir}")
+        print(f"\n Results saved to: {results_path}")
+        print(f" Videos saved to: {self.video_dir}")
         print("=" * 70)
 
         return results
@@ -467,4 +467,5 @@ if __name__ == "__main__":
     if args.evaluation_method == 'evaluate_policy':
         results = tester.test_with_evaluate_policy(model_type=args.model_type)
     else:
+
         results = tester.test_with_detailed_tracking(model_type=args.model_type)
