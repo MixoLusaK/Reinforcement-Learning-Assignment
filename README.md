@@ -54,8 +54,13 @@ Crafter_Project/
 │   ├── frame_stacking.py
 │   ├──call_backs.py
 │   ├──single_cnn_channel.py
-│   └── image_processing.py        # Image normalization, resizing, and filtering
-│
+│   └── image_processing.py       
+├── Training/               # Models for DQN and PPO
+│   ├── dqn_baseline.zip
+│   ├── dqn_reward_shaped.zip
+│   ├── dqn_image_processed.zip
+│   ├── dqn_frame_staked.zip
+├── Results/                       #json files for the models testing
 ├── environment.yml                # Project dependencies
 └── README.md
 
