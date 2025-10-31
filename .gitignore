@@ -4,8 +4,6 @@ venv/
 env/
 
 # Training outputs - DON'T COMMIT THESE
-Training/Logs/
-*.zip
 checkpoints/
 *.pth
 *.pt
