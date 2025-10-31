@@ -231,33 +231,24 @@ class DQN_Model:
         return model, env
 
     def baseline_dqn(self):
-        """
-        Baseline DQN with standard 64x64x3 RGB observations.
-        No improvements.
-        """
+        """Baseline DQN """
         return self.train_model(make_crafter_env)
 
     def reward_shaped_dqn(self):
         """
-        DQN with reward shaping only.
         Improvement 1: Belief-based Reward Shaping
         """
         return self.train_model(make_shaped_crafter_env)
 
     def preprocessed_shaped_dqn(self):
         """
-        DQN with reward shaping AND image preprocessing.
-        Improvement 1: Reward shaping
-        Improvement 2: Grayscale + Normalize (64x64x3 → 64x64x1)
+        Improvement 2: Grayscale + Normalize
         """
         return self.train_model(make_preprocessed_shaped_crafter_env)
 
     def framestack_dqn(self):
         """
-        DQN with all improvements: reward shaping, preprocessing, and frame stacking.
-        Improvement 1: Reward shaping
-        Improvement 2: Grayscale + Normalize (64x64x3 → 64x64x1)
-        Improvement 3: Frame stacking (64x64x1 → 64x64x4) for temporal context
+        Improvement 3: Frame stacking
         """
         return self.train_model(make_framestack_crafter_env)
 

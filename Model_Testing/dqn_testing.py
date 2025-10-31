@@ -148,37 +148,56 @@ class DQN_Testing:
             "eat_cow", "eat_plant", "wake_up"
         ]
 
-    def _make_test_env(self, record_stats=True):
+    def _make_test_env(self, record_stats=True, record_video=False):
         """
         Create a testing environment compatible with the training setup.
         """
         # Create base Crafter environment (standard rewards, no reward shaping)
         env = old_gym.make("CrafterPartial-v1")
 
-        # Ensure metadata is set properly
-        if not hasattr(env, 'metadata') or env.metadata is None:
-            env.metadata = {'render_modes': ['rgb_array']}
+        # CRITICAL: Ensure all wrappers have proper metadata
+        # The Recorder needs metadata.render_modes to be available at every level
+        def ensure_metadata(env_obj):
+            """Helper to ensure metadata exists on environment"""
+            if not hasattr(env_obj, "metadata") or env_obj.metadata is None:
+                env_obj.metadata = {"render_modes": ["rgb_array"], "render_fps": 30}
+            elif "render_modes" not in env_obj.metadata:
+                env_obj.metadata["render_modes"] = ["rgb_array"]
+            if "render_fps" not in env_obj.metadata:
+                env_obj.metadata["render_fps"] = 30
+
+        ensure_metadata(env)
+
+        # Ensure all nested environments have metadata
+        current = env
+        while hasattr(current, 'env'):
+            current = current.env
+            ensure_metadata(current)
 
         # Use Crafter's built-in Recorder for stats tracking
         if record_stats:
             env = crafter.Recorder(
                 env,
-                self.results_dir,
+                self.video_dir,
                 save_stats=True,
-                save_video=False,
+                save_video=record_video,
                 save_episode=False
             )
+            ensure_metadata(env)
 
         # Apply GymV21 compatibility wrapper
         env = GymV21CompatibilityV0(env=env)
+        ensure_metadata(env)
 
         # Apply preprocessing if required
         if self.use_preprocessing:
             env = GrayscaleNormalizeWrapper(env)
+            ensure_metadata(env)
 
         # Apply frame stacking if required
         if self.use_frame_stacking:
             env = FrameStackWrapper(env, num_stack=self.num_stack)
+            ensure_metadata(env)
 
         return env
 
@@ -267,7 +286,15 @@ class DQN_Testing:
         print("=" * 70)
 
         for episode in range(self.num_episodes):
-            env = self._make_test_env(record_stats=True)
+            # Record video for first 10 episodes
+            record_video = episode < 10
+
+            # Create new environment with video recording enabled if needed
+            env = self._make_test_env(record_stats=True, record_video=record_video)
+
+            if record_video:
+                print(f"🎥 Recording video for episode {episode + 1}")
+
             obs = env.reset()
             if isinstance(obs, tuple):
                 obs, info = obs
@@ -381,7 +408,8 @@ class DQN_Testing:
         with open(results_path, 'w') as f:
             json.dump(results, f, indent=2)
 
-        print(f"✓ Results saved to: {results_path}")
+        print(f"\n✓ Results saved to: {results_path}")
+        print(f"✓ Videos saved to: {self.video_dir}")
         print("=" * 70)
 
         return results
